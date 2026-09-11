@@ -9,7 +9,7 @@ from functools import wraps
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-import config, datasource, engine, reports, store
+import config, datasource, engine, llm, reports, store
 from indicators import BY_ID, INDICATORS, LLM_MODES
 
 STATIC = config.ROOT
@@ -220,6 +220,52 @@ def api_override(ind_id):
             return jsonify({"error": str(e)}), 400
     engine.load_all(force_live=False, background=True)
     return jsonify({"ok": True, "rows": n})
+
+
+@app.get("/api/table")
+def api_table():
+    nr = not_ready()
+    if nr:
+        return nr
+    return jsonify(engine.data_table(int(request.args.get("months", 24))))
+
+
+@app.get("/api/data.csv")
+def api_data_csv():
+    nr = not_ready()
+    if nr:
+        return nr
+    return Response(datasource.export_csv(engine._state["series"]), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=macro_data.csv"})
+
+
+@app.post("/api/update_and_predict")
+@need_auth
+def api_update_and_predict():
+    j = request.get_json(force=True) or {}
+    job = engine.update_and_predict(j.get("mode", "title"), j.get("model"))
+    return jsonify({**job, "status_after": engine.status()})
+
+
+@app.post("/api/ask")
+@need_auth
+def api_ask():
+    nr = not_ready()
+    if nr:
+        return nr
+    j = request.get_json(force=True) or {}
+    msgs = j.get("messages") or []
+    if not msgs or not isinstance(msgs, list):
+        return jsonify({"error": "缺少 messages"}), 400
+    msgs = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))[:8000]} for m in msgs[-12:]]
+    system = ("你是“观数”宏观研究助手，服务于投资经理。请基于下方系统提供的最新宏观数据与模型预测作答，"
+              "引用具体数值与月份；对未来判断给出方向、幅度与依据；数据未覆盖的内容明确说明。用中文、简洁、结论先行。\n\n"
+              + engine.ask_context())
+    try:
+        res = llm.chat([{"role": "system", "content": system}] + msgs, j.get("model"))
+    except Exception as e:  # noqa
+        return jsonify({"error": str(e)}), 502
+    return jsonify(res)
 
 
 @app.post("/api/auth/check")

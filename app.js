@@ -6,7 +6,7 @@ const S = { meta: null, overview: null, view: "workbench", jobs: {}, seriesCache
 const MODE_NAMES = { title: "仅当月研报标题", chunk: "仅当月研报正文片段", title_ar: "标题 + 自回归参考", chunk_ar: "正文片段 + 自回归参考" };
 const MODE_SHORT = { title: "LLM标题", chunk: "LLM正文", title_ar: "标题+自回归", chunk_ar: "正文+自回归" };
 const REC_NAME = { persist: "沿用上期", ar: "SARIMAX", llm: "DeepSeek" };
-const VIEW_TITLE = { workbench: "预测工作台", reports: "数据与研报", backtest: "滚动回测", archive: "预测档案", method: "方法与设置" };
+const VIEW_TITLE = { workbench: "预测工作台", reports: "数据与研报", backtest: "滚动回测", archive: "预测档案", ask: "问 AI", method: "方法与设置" };
 
 function pwd() { try { return localStorage.getItem("nowcast_pwd") || ""; } catch (e) { return ""; } }
 async function api(path, opts = {}) {
@@ -15,8 +15,16 @@ async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   let j = null;
   try { j = await r.json(); } catch (e) { j = { error: `HTTP ${r.status}` }; }
+  if (r.status === 401) promptPwd();
   if (!r.ok) { const err = new Error((j && j.error) || `HTTP ${r.status}`); err.status = r.status; err.body = j; throw err; }
   return j;
+}
+function promptPwd() {
+  openModal(`<h2>需要访问口令</h2><p class="muted">运行 DeepSeek、刷新数据等会产生费用的操作需要站点口令（部署时设置的 ACCESS_PASSWORD）。口令只保存在本浏览器。</p>
+    <div class="ctl-row"><input type="password" id="pwdModal" placeholder="输入访问口令" autofocus><button class="btn primary" id="pwdModalSave">保存并重试</button></div>`);
+  const save = () => { try { localStorage.setItem("nowcast_pwd", $("#pwdModal").value); } catch (e) { } $("#modal").hidden = true; };
+  $("#pwdModalSave").onclick = save; $("#pwdModal").addEventListener("keydown", ev => { if (ev.key === "Enter") save(); });
+  setTimeout(() => $("#pwdModal").focus(), 50);
 }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function ind(id) { return S.meta.indicators.find(x => x.id === id); }
@@ -167,6 +175,20 @@ async function runNowcast(ids, btn) {
     $("#jobBox").innerHTML = `<div class="job"><span class="err">${esc(e.message)}${e.status === 401 ? " → 前往“方法与设置”输入口令" : ""}</span></div>`;
   }
 }
+async function updateAndPredict() {
+  const btn = $("#updateAll"); btn.disabled = true;
+  $("#jobBox").innerHTML = `<div class="job">正在从数据源拉取最新数据并重算 10 个指标的 SARIMAX 模型（约 30–60 秒）…<div class="bar"><i style="width:15%"></i></div></div>`;
+  try {
+    const job = await api("/api/update_and_predict", { method: "POST", json: { mode: $("#modeSel").value, model: $("#modelSel").value } });
+    S.seriesCache = {}; await refreshStatus(); await loadOverview();
+    const st = job.status_after || {};
+    $("#topMeta").insertAdjacentHTML("afterbegin", `<span class="up">● 数据已更新至 ${esc((st.data || {}).fetched_at || "")}</span><br>`);
+    trackJob(job.id, $("#jobBox"), () => { loadOverview(); btn.disabled = false; });
+  } catch (e) {
+    btn.disabled = false;
+    $("#jobBox").innerHTML = `<div class="job"><span class="err">${esc(e.message)}${e.status === 401 ? " → 前往“方法与设置”输入口令" : ""}</span></div>`;
+  }
+}
 function trackJob(id, box, onDone) {
   const tick = async () => {
     let j; try { j = await api(`/api/jobs/${id}`); } catch (e) { return; }
@@ -205,6 +227,20 @@ async function getSeries(id, force) {
 }
 
 /* ------------------------------------------------------------------ 数据与研报 */
+async function renderTable() {
+  const n = $("#tblMonths").value;
+  let t; try { t = await api(`/api/table?months=${n}`); } catch (e) { $("#dataTable").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; return; }
+  const st = S.status || {};
+  $("#tblMeta").textContent = `· ${(st.data || {}).source || ""} · 数据版本 ${st.loaded_at || ""}`;
+  const months = t.months;
+  let h = `<tr><th>指标（单位）</th>${months.map(m => `<th>${m.slice(2).replace("-", "/")}</th>`).join("")}</tr>`;
+  t.columns.forEach(c => {
+    h += `<tr class="${c.role}"><td title="${esc(c.name)}">${esc(c.short)} <span class="lo">${esc(c.unit)}</span></td>` +
+      c.values.map((v, i) => `<td class="${months[i] === c.latest_month ? "latest" : ""}">${v == null ? "" : fmtV(v, c.unit)}</td>`).join("") + "</tr>";
+  });
+  $("#dataTable").innerHTML = h;
+  const wrap = $("#dataTable").parentElement; wrap.scrollLeft = wrap.scrollWidth;
+}
 async function renderSeries() {
   const id = $("#serInd").value, m = ind(id), from = $("#serFrom").value || "2014-01";
   const ser = await getSeries(id);
@@ -312,6 +348,27 @@ $("#modalX").onclick = () => { $("#modal").hidden = true; };
 $("#modal").onclick = ev => { if (ev.target.id === "modal") $("#modal").hidden = true; };
 document.addEventListener("keydown", ev => { if (ev.key === "Escape") $("#modal").hidden = true; });
 
+/* ------------------------------------------------------------------ 问 AI */
+S.chat = [];
+function mdLite(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/^#{1,4}\s*(.+)$/gm, "<b>$1</b>").replace(/^\s*[-•]\s+/gm, "· "); }
+function addMsg(role, text, meta) {
+  const d = document.createElement("div"); d.className = "msg " + role;
+  d.innerHTML = role === "ai" ? mdLite(text) + (meta ? `<span class="meta">${esc(meta)}</span>` : "") : esc(text);
+  $("#chatBox").appendChild(d); $("#chatBox").scrollTop = 1e9; return d;
+}
+async function askSend() {
+  const q = $("#askInput").value.trim(); if (!q) return;
+  $("#askInput").value = ""; addMsg("user", q); S.chat.push({ role: "user", content: q });
+  const wait = addMsg("ai think", "思考中…（推理模型约 10–40 秒）");
+  $("#askSend").disabled = true;
+  try {
+    const r = await api("/api/ask", { method: "POST", json: { messages: S.chat, model: $("#askModel").value } });
+    wait.remove(); addMsg("ai", r.content, `${r.model} · ${r.latency ? r.latency.toFixed(1) + " 秒" : ""} · ${r.tokens || "—"} tokens`);
+    S.chat.push({ role: "assistant", content: r.content });
+  } catch (e) { wait.remove(); addMsg("ai", "出错：" + e.message + (e.status === 401 ? "。已弹出口令输入框，保存后重新发送即可。" : "")); S.chat.pop(); }
+  $("#askSend").disabled = false; $("#askInput").focus();
+}
+
 /* ------------------------------------------------------------------ 方法原文 */
 function renderPaper() {
   const P = (id, k) => { const p = ind(id).paper; return p && p[k] != null ? p[k].toFixed(2) : "—"; };
@@ -379,8 +436,8 @@ async function savePwd() {
   catch (e) { $("#pwdMsg").textContent = "✗ " + e.message; }
 }
 async function doRefresh() {
-  try { await api("/api/refresh", { method: "POST", json: {} }); $("#dataInfo").textContent = "已开始重新抓取，完成后自动更新（约 1 分钟）"; S.seriesCache = {}; setTimeout(() => { loadOverview(); refreshStatus(); }, 8000); }
-  catch (e) { $("#dataInfo").textContent = e.message; }
+  try { await api("/api/refresh", { method: "POST", json: {} }); toast("已开始重新抓取数据源，约 1 分钟后自动更新", $("#dataInfo")); $("#tblMeta").textContent = "· 正在从东方财富重新抓取，约 1 分钟后自动更新…"; S.seriesCache = {}; setTimeout(() => { loadOverview(); refreshStatus(); if (S.view === "reports") { renderTable(); renderSeries(); } }, 15000); }
+  catch (e) { const m = e.message + (e.status === 401 ? "（请先在“方法与设置”输入访问口令）" : ""); toast(m, $("#dataInfo")); $("#tblMeta").textContent = "· " + m; }
 }
 async function doOverride(clear) {
   const id = $("#ovInd").value;
@@ -403,7 +460,8 @@ function show(v) {
   $("#viewTitle").textContent = VIEW_TITLE[v];
   if (!S.meta) return;
   if (v === "workbench") loadOverview();
-  if (v === "reports") renderSeries();
+  if (v === "reports") { renderTable(); renderSeries(); if (!S.repLoaded) { S.repLoaded = true; renderReports(); } }
+  if (v === "ask") { fillSelect($("#askModel"), S.meta.models.map(m => [m, m]), S.meta.model); setTimeout(() => $("#askInput").focus(), 50); }
   if (v === "backtest") renderBacktest();
   if (v === "archive") renderArchive();
   if (v === "method") { renderPaper(); const st = S.status || {}; $("#dataInfo").textContent = `当前：${(st.data || {}).source || "—"}，数据版本 ${st.loaded_at || "—"}，上次检查 ${st.last_check || "—"}；服务端每 ${st.refresh_hours} 小时轮询数据源，有新数据时页面自动刷新。`; $("#pwd").value = pwd(); }
@@ -421,6 +479,7 @@ async function init() {
   fillSelect($("#llmModel"), S.meta.models.map(m => [m, m]), S.meta.model);
   $("#btModel").innerHTML = `<option value="">全部</option>` + S.meta.models.map(m => `<option>${esc(m)}</option>`).join("");
   ["#serInd", "#ovInd"].forEach(s => fillSelect($(s), inds, "export_yoy"));
+  fillSelect($("#askModel"), S.meta.models.map(m => [m, m]), S.meta.model);
   ["#repInd", "#btInd", "#llmInd", "#leakInd"].forEach(s => fillSelect($(s), nowInds, "export_yoy"));
   $("#arcInd").innerHTML = `<option value="">全部</option>` + inds.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
   $("#llmModes").innerHTML = modes.map(([k, t]) => `<label><input type="checkbox" value="${k}" ${k === "title" ? "checked" : ""}> ${t}</label>`).join("");
@@ -429,6 +488,10 @@ async function init() {
   $("#repMonth").value = pym; $("#repMonth").max = ym; $("#llmTo").value = pym; $("#btFrom").value = S.meta.backtest_start;
   $("#leakSplit").value = S.meta.leak_split; $("#llmFrom").min = S.meta.llm_earliest;
   $("#runAll").onclick = () => runNowcast(S.meta.indicators.filter(i => i.role === "nowcast").map(i => i.id), $("#runAll"));
+  $("#updateAll").onclick = updateAndPredict;
+  $("#tblMonths").onchange = renderTable; $("#refreshData").onclick = doRefresh;
+  $("#askSend").onclick = askSend; $("#askClear").onclick = () => { S.chat = []; $("#chatBox").innerHTML = ""; };
+  $("#askInput").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); askSend(); } });
   $("#serInd").onchange = renderSeries; $("#serFrom").onchange = renderSeries;
   $("#repGo").onclick = renderReports;
   $("#btGo").onclick = renderBacktest; $("#btInd").onchange = renderBtChart;

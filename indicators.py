@@ -72,6 +72,25 @@ INDICATORS = [
         "spring": False, "seasonal": False, "jan_merge": False, "fmt": "{:.1f}", "release": "次月 10–15 日（央行）",
         "keywords": ["M2", "货币"], "paper": {"persist": 0.96, "ar": 0.95},
     },
+    # —— 参考指标（原文未入选实时预测：PMI 无发布滞后；仅展示、供问答与研判参考）——
+    {
+        "id": "pmi_mfg", "name": "制造业PMI", "short": "制造业PMI", "unit": "%",
+        "source": "RPT_ECONOMY_PMI", "field": "MAKE_INDEX", "role": "ref", "group": "景气",
+        "spring": False, "seasonal": False, "jan_merge": False, "fmt": "{:.1f}", "release": "当月月末（国家统计局，无滞后）",
+        "keywords": ["PMI", "景气", "制造业"], "paper": None,
+    },
+    {
+        "id": "pmi_nonmfg", "name": "非制造业PMI", "short": "非制造业PMI", "unit": "%",
+        "source": "RPT_ECONOMY_PMI", "field": "NMAKE_INDEX", "role": "ref", "group": "景气",
+        "spring": False, "seasonal": False, "jan_merge": False, "fmt": "{:.1f}", "release": "当月月末（国家统计局，无滞后）",
+        "keywords": ["PMI", "服务业", "建筑业"], "paper": None,
+    },
+    {
+        "id": "m1_yoy", "name": "M1同比", "short": "M1同比", "unit": "%",
+        "source": "RPT_ECONOMY_CURRENCY_SUPPLY", "field": "CURRENCY_SAME", "role": "ref", "group": "流动性",
+        "spring": False, "seasonal": False, "jan_merge": False, "fmt": "{:.1f}", "release": "次月 10–15 日（央行）",
+        "keywords": ["M1", "货币"], "paper": None,
+    },
 ]
 
 BY_ID = {x["id"]: x for x in INDICATORS}
@@ -91,5 +110,6 @@ SOURCE_FIELDS = {
     "RPT_ECONOMY_INDUS_GROW": ["BASE_SAME", "BASE_ACCUMULATE"],
     "RPT_ECONOMY_RMB_LOAN": ["RMB_LOAN"],
     "RPT_ECONOMY_CUSTOMS": ["EXIT_BASE_SAME", "IMPORT_BASE_SAME", "TRADE_BAL_100M_USD"],
-    "RPT_ECONOMY_CURRENCY_SUPPLY": ["BASIC_CURRENCY_SAME"],
+    "RPT_ECONOMY_CURRENCY_SUPPLY": ["BASIC_CURRENCY_SAME", "CURRENCY_SAME"],
+    "RPT_ECONOMY_PMI": ["MAKE_INDEX", "NMAKE_INDEX"],
 }

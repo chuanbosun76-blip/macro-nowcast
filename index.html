@@ -18,6 +18,7 @@
       <a href="#reports" data-v="reports"><b>数据与研报</b><span>序列 · 研报召回</span></a>
       <a href="#backtest" data-v="backtest"><b>滚动回测</b><span>扩展窗口 · 相关性</span></a>
       <a href="#archive" data-v="archive"><b>预测档案</b><span>DeepSeek 调用记录</span></a>
+      <a href="#ask" data-v="ask"><b>问 AI</b><span>基于最新数据的研判问答</span></a>
       <a href="#method" data-v="method"><b>方法与设置</b><span>原文框架 · 口令</span></a>
     </nav>
     <div class="side-foot" id="sideStatus">连接中…</div>
@@ -48,8 +49,9 @@
         <div class="ctl-row">
           <label>LLM 输入<select id="modeSel"></select></label>
           <label>模型<select id="modelSel"></select></label>
-          <button class="btn primary" id="runAll">DeepSeek 预测全部待测指标</button>
-          <span class="hint" id="runHint">每个指标约 10–60 秒；结果自动写入预测档案</span>
+          <button class="btn primary" id="updateAll">⟳ 更新最新数据并预测全部指标</button>
+          <button class="btn" id="runAll">仅运行 DeepSeek 预测</button>
+          <span class="hint" id="runHint">先从统计局/海关/央行口径（东方财富）拉取最新数据、重算模型，再逐个调用 DeepSeek；约 1–3 分钟</span>
         </div>
         <div id="jobBox"></div>
       </div>
@@ -62,6 +64,16 @@
 
     <!-- 数据与研报 -->
     <section class="view" id="v-reports" hidden>
+      <div class="panel">
+        <h2>最新数据总表 <small id="tblMeta"></small></h2>
+        <div class="ctl-row">
+          <label>显示<select id="tblMonths"><option value="12">近 12 个月</option><option value="24" selected>近 24 个月</option><option value="60">近 5 年</option><option value="240">全部</option></select></label>
+          <a class="btn ghost" id="csvAll" href="/api/data.csv">下载全部数据 CSV</a>
+          <button class="btn ghost" id="refreshData">⟳ 立即刷新数据源</button>
+          <span class="hint">来源：东方财富数据中心（国家统计局 / 海关总署 / 央行口径），服务端每小时自动轮询</span>
+        </div>
+        <div class="tbl-wrap"><table class="data" id="dataTable"></table></div>
+      </div>
       <div class="panel">
         <h2>序列走势</h2>
         <div class="ctl-row">
@@ -144,6 +156,23 @@
           <a class="btn ghost" id="arcCsv" href="/api/runs.csv">导出 CSV</a>
         </div>
         <div class="tbl-wrap"><table class="arc" id="arcTable"></table></div>
+      </div>
+    </section>
+
+    <!-- 问 AI -->
+    <section class="view" id="v-ask" hidden>
+      <div class="panel ask">
+        <h2>问 AI <small>· DeepSeek，已注入全部指标最新数据与三种方法的当期预测</small></h2>
+        <div class="ctl-row">
+          <label>模型<select id="askModel"></select></label>
+          <button class="btn ghost sm" id="askClear">清空对话</button>
+          <span class="hint">示例：下月出口同比大概多少？为什么 CPI 环比预测转正？信贷弱在哪里？</span>
+        </div>
+        <div class="chat" id="chatBox"><div class="msg ai">你好，我是观数研究助手。我已读取全部宏观指标的最新公布值、SARIMAX 与 DeepSeek 的当期预测及回测表现，可以直接问我数据、预测和逻辑。</div></div>
+        <div class="ask-row">
+          <textarea id="askInput" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+          <button class="btn primary" id="askSend">发送</button>
+        </div>
       </div>
     </section>
 

@@ -108,3 +108,20 @@ def call_deepseek(prompt: str, model: str | None = None):
             last = str(e)
             time.sleep(3 * (attempt + 1))
     raise RuntimeError(f"DeepSeek 调用失败：{last}")
+
+
+def chat(messages, model=None, max_tokens=4000):
+    """通用对话（问 AI 页面）。"""
+    if not config.DEEPSEEK_API_KEY:
+        raise RuntimeError("未配置 DEEPSEEK_API_KEY")
+    model = model or config.DEEPSEEK_MODEL
+    body = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": False}
+    headers = {"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    t0 = time.time()
+    r = httpx.post(f"{config.DEEPSEEK_BASE_URL}/chat/completions", json=body, headers=headers, timeout=config.DEEPSEEK_TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"DeepSeek HTTP {r.status_code}: {r.text[:300]}")
+    j = r.json()
+    msg = j["choices"][0]["message"]
+    return {"content": msg.get("content") or "", "reasoning": (msg.get("reasoning_content") or "")[:3000],
+            "model": j.get("model", model), "latency": time.time() - t0, "tokens": (j.get("usage") or {}).get("total_tokens")}

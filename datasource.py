@@ -110,7 +110,9 @@ def build_series(ind_id: str, raw=None):
     1–2 月合并发布的指标剔除 1 月（2 月值即 1–2 月合并值）；个别缺失月线性插值。"""
     raw = raw or _state["raw"] or load()
     ind = BY_ID[ind_id]
-    tbl = raw[ind["source"]]
+    tbl = raw.get(ind["source"])
+    if not tbl or ind["field"] not in tbl["fields"]:
+        return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
     fi = tbl["fields"].index(ind["field"])
     fb = tbl["fields"].index(ind["fallback"]) if ind.get("fallback") in tbl["fields"] else None
     data = {}
@@ -185,3 +187,16 @@ def clear_override(ind_id: str):
 
 def status():
     return {"source": _state["source"], "fetched_at": _state["fetched_at"], "errors": _state["errors"]}
+
+
+def export_csv(series: dict) -> str:
+    """所有指标按月透视为 CSV（UTF-8 BOM，Excel 可直接打开）。"""
+    months = sorted({m for s in series.values() for m in s["months"]})
+    ids = [i["id"] for i in INDICATORS if i["id"] in series]
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["月份"] + [BY_ID[i]["name"] + f"（{BY_ID[i]['unit']}）" for i in ids])
+    lookup = {i: dict(zip(series[i]["months"], series[i]["values"])) for i in ids}
+    for m in months:
+        w.writerow([m] + [lookup[i].get(m, "") for i in ids])
+    return "\ufeff" + out.getvalue()

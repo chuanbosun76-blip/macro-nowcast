@@ -81,6 +81,9 @@ def load_all(force_live=False, background=True):
                     _state["version"] = version
                     _state["loaded_at"] = _state["last_check"]
             for ind in INDICATORS:
+                if ind["role"] == "ref":
+                    _state["ar_progress"][ind["id"]] = 1.0
+                    continue
                 compute_ar(ind["id"])
             with _lock:
                 _state["ready"] = True
@@ -222,7 +225,7 @@ def overview():
     rows = []
     for ind in INDICATORS:
         s = _state["series"].get(ind["id"])
-        if not s or not s["months"]:
+        if not s or not s["months"] or ind["role"] == "ref":
             continue
         ar = _state["ar"].get(ind["id"]) or {}
         pm = pending_month(ind["id"])
@@ -259,6 +262,8 @@ def series_payload(ind_id, model=None):
 def backtest_table(start=None, end=None, model=None):
     rows = []
     for ind in INDICATORS:
+        if ind["role"] == "ref":
+            continue
         sm = summary(ind["id"], start, end, model)
         ar = _state["ar"].get(ind["id"]) or {}
         if sm is None:
@@ -384,3 +389,55 @@ def auto_refresh_loop():
             load_all(force_live=True, background=False)
         except Exception:
             traceback.print_exc()
+
+
+# ------------------------------------------------------------------ 数据表 / 问答上下文
+def data_table(n_months: int = 24):
+    """全部指标最近 n 个月透视表（供“数据与研报”页展示）。"""
+    series = _state["series"]
+    months = sorted({m for s in series.values() for m in s["months"]})[-n_months:]
+    cols = []
+    for ind in INDICATORS:
+        s = series.get(ind["id"])
+        if not s or not s["months"]:
+            continue
+        lk = dict(zip(s["months"], s["values"]))
+        cols.append({"id": ind["id"], "name": ind["name"], "short": ind["short"], "unit": ind["unit"], "role": ind["role"],
+                     "group": ind["group"], "latest_month": s["months"][-1], "latest": s["values"][-1],
+                     "values": [lk.get(m) for m in months]})
+    return {"months": months, "columns": cols}
+
+
+def ask_context(max_months: int = 18) -> str:
+    """把最新数据、三种方法的当期预测、最近 DeepSeek 结论压成文本，作为问答系统提示。"""
+    lines = ["【最新宏观数据（东方财富数据中心，国家统计局/海关/央行口径）】"]
+    t = data_table(max_months)
+    for c in t["columns"]:
+        vals = [(m, v) for m, v in zip(t["months"], c["values"]) if v is not None][-max_months:]
+        seq = "，".join(f"{m[2:].replace('-', '/')}:{v:g}" for m, v in vals)
+        lines.append(f"- {c['name']}（{c['unit']}）最新 {c['latest_month']}={c['latest']:g}；近期序列：{seq}")
+    lines.append("")
+    lines.append("【当期实时预测（三种方法）】")
+    for r in overview():
+        llm = (r.get("llm_latest") or [None])[0]
+        parts = [f"沿用上期={r['persist_pred']:g}" if r.get("persist_pred") is not None else "",
+                 f"SARIMAX{r.get('ar_order') or ''}={r['ar_pred']:.2f}" if r.get("ar_pred") is not None else "",
+                 f"DeepSeek读研报={llm['value']:g}（理由：{llm.get('reason') or ''}）" if llm else "DeepSeek=未运行"]
+        lines.append(f"- {r['name']}：待发布 {r['pending_month']}；" + "；".join(p for p in parts if p) +
+                     f"；推荐方法：{r.get('recommend')}（{r.get('why')}）；回测相关性 沿用{_f(r.get('persist_corr'))}/自回归{_f(r.get('ar_corr'))}")
+    return "\n".join(lines)
+
+
+def _f(v):
+    return "—" if v is None else f"{v:.2f}"
+
+
+def update_and_predict(mode="title", model=None):
+    """一键：强制刷新数据源 → 重算自回归 → 对全部待测指标运行 DeepSeek。"""
+    load_all(force_live=True, background=False)
+    items = []
+    for ind in INDICATORS:
+        if ind["role"] != "nowcast":
+            continue
+        items.append((ind["id"], pending_month(ind["id"]), mode, "live"))
+    return start_job(items, model, force=True, label="更新数据并预测")
