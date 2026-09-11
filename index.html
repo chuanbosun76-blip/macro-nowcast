@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>观数 · 宏观实时预测研究台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <div class="seal">观</div>
+      <div><div class="brand-t">观数</div><div class="brand-s">MACRO NOWCAST</div></div>
+    </div>
+    <nav id="nav">
+      <a href="#workbench" data-v="workbench"><b>预测工作台</b><span>三法并行 · 当期预测</span></a>
+      <a href="#reports" data-v="reports"><b>数据与研报</b><span>序列 · 研报召回</span></a>
+      <a href="#backtest" data-v="backtest"><b>滚动回测</b><span>扩展窗口 · 相关性</span></a>
+      <a href="#archive" data-v="archive"><b>预测档案</b><span>DeepSeek 调用记录</span></a>
+      <a href="#method" data-v="method"><b>方法与设置</b><span>原文框架 · 口令</span></a>
+    </nav>
+    <div class="side-foot" id="sideStatus">连接中…</div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">量化配置 · 宏观实时预测</div>
+        <h1 id="viewTitle">预测工作台</h1>
+      </div>
+      <div class="topmeta" id="topMeta"></div>
+    </header>
+
+    <!-- 预测工作台 -->
+    <section class="view" id="v-workbench">
+      <div class="panel flow">
+        <h2>决策流程</h2>
+        <ol class="steps">
+          <li><em>1</em><div><b>沿用上期</b><p>与上期值相关性 ≥ 0.8：不建模，直接沿用最新公布值</p></div></li>
+          <li><em>2</em><div><b>SARIMAX</b><p>平稳、自相关、弱趋势：扩展窗口自回归，春节假期占比作外生变量</p></div></li>
+          <li><em>3</em><div><b>DeepSeek 读研报</b><p>弱相关、外生冲击多：解析当月宏观/策略研报标题，输出数值与理由</p></div></li>
+        </ol>
+      </div>
+
+      <div class="panel controls">
+        <h2>运行设置</h2>
+        <div class="ctl-row">
+          <label>LLM 输入<select id="modeSel"></select></label>
+          <label>模型<select id="modelSel"></select></label>
+          <button class="btn primary" id="runAll">DeepSeek 预测全部待测指标</button>
+          <span class="hint" id="runHint">每个指标约 10–60 秒；结果自动写入预测档案</span>
+        </div>
+        <div id="jobBox"></div>
+      </div>
+
+      <h2 class="sec">指标看板 <small>· 需实时预测</small></h2>
+      <div class="cards" id="cardsNow"></div>
+      <h2 class="sec">高相关组 <small>· 原文“直接沿用上期”</small></h2>
+      <div class="cards compact" id="cardsPersist"></div>
+    </section>
+
+    <!-- 数据与研报 -->
+    <section class="view" id="v-reports" hidden>
+      <div class="panel">
+        <h2>序列走势</h2>
+        <div class="ctl-row">
+          <label>指标<select id="serInd"></select></label>
+          <label>起始<input type="month" id="serFrom" value="2019-01"></label>
+          <span class="hint" id="serNotes"></span>
+        </div>
+        <div class="chart" id="serChart"></div>
+        <div class="diag" id="serDiag"></div>
+      </div>
+      <div class="panel">
+        <h2>研报召回</h2>
+        <div class="ctl-row">
+          <label>指标<select id="repInd"></select></label>
+          <label>月份<input type="month" id="repMonth"></label>
+          <label>输入<select id="repMode"></select></label>
+          <button class="btn" id="repGo">召回当月研报</button>
+          <span class="hint">来源：东方财富研报中心（宏观研究 + 策略报告），按指标关键词召回、标题去重</span>
+        </div>
+        <div id="repOut" class="rep-out"><p class="muted">选择指标与月份后点击“召回当月研报”。</p></div>
+      </div>
+    </section>
+
+    <!-- 滚动回测 -->
+    <section class="view" id="v-backtest" hidden>
+      <div class="panel">
+        <h2>回测对比</h2>
+        <div class="ctl-row">
+          <label>起<input type="month" id="btFrom"></label>
+          <label>止<input type="month" id="btTo"></label>
+          <label>LLM 模型<select id="btModel"><option value="">全部</option></select></label>
+          <button class="btn" id="btGo">重新计算</button>
+          <span class="hint">指标为预测值与真实值的相关系数（原文口径）；灰色小字为中金原文结果</span>
+        </div>
+        <div class="tbl-wrap"><table class="bt" id="btTable"></table></div>
+      </div>
+      <div class="panel">
+        <h2>曲线对照</h2>
+        <div class="ctl-row">
+          <label>指标<select id="btInd"></select></label>
+          <span class="legend" id="btLegend"></span>
+        </div>
+        <div class="chart" id="btChart"></div>
+      </div>
+      <div class="panel">
+        <h2>文本回测</h2>
+        <div class="ctl-row">
+          <label>指标<select id="llmInd"></select></label>
+          <label>起<input type="month" id="llmFrom" value="2024-01"></label>
+          <label>止<input type="month" id="llmTo"></label>
+          <label>模型<select id="llmModel"></select></label>
+        </div>
+        <div class="ctl-row modes" id="llmModes"></div>
+        <div class="ctl-row">
+          <button class="btn primary" id="llmGo">运行 DeepSeek 历史回测</button>
+          <span class="hint">逐月用当月研报文本预测，已跑过的月份自动跳过；研报库自 2017 年起可得</span>
+        </div>
+        <div id="llmJob"></div>
+      </div>
+      <div class="panel">
+        <h2>泄漏检验</h2>
+        <div class="ctl-row">
+          <label>指标<select id="leakInd"></select></label>
+          <label>切分月<input type="month" id="leakSplit"></label>
+          <button class="btn" id="leakGo">检验</button>
+          <span class="hint">对比模型预训练截止前后 LLM 预测表现，判断回测是否受“记住未来”影响</span>
+        </div>
+        <div id="leakOut"></div>
+      </div>
+    </section>
+
+    <!-- 预测档案 -->
+    <section class="view" id="v-archive" hidden>
+      <div class="panel">
+        <h2>预测档案</h2>
+        <div class="ctl-row">
+          <label>指标<select id="arcInd"><option value="">全部</option></select></label>
+          <label>类型<select id="arcSrc"><option value="">全部</option><option value="live">实时</option><option value="backtest">回测</option></select></label>
+          <button class="btn" id="arcGo">刷新</button>
+          <a class="btn ghost" id="arcCsv" href="/api/runs.csv">导出 CSV</a>
+        </div>
+        <div class="tbl-wrap"><table class="arc" id="arcTable"></table></div>
+      </div>
+    </section>
+
+    <!-- 方法与设置 -->
+    <section class="view" id="v-method" hidden>
+      <div class="panel">
+        <h2>系统设置</h2>
+        <div class="set-grid">
+          <div>
+            <h3>访问口令</h3>
+            <p class="muted">公网部署时，运行 DeepSeek、刷新数据、上传数据需口令（服务端环境变量 ACCESS_PASSWORD）。口令仅保存在本浏览器。</p>
+            <div class="ctl-row"><input type="password" id="pwd" placeholder="输入访问口令"><button class="btn" id="pwdSave">保存并验证</button><span class="hint" id="pwdMsg"></span></div>
+          </div>
+          <div>
+            <h3>数据刷新</h3>
+            <p class="muted" id="dataInfo"></p>
+            <div class="ctl-row"><button class="btn" id="refresh">从东方财富重新抓取并重算模型</button></div>
+          </div>
+          <div>
+            <h3>数据覆盖</h3>
+            <p class="muted">可上传 Wind 等口径的 CSV（两列：月份,数值，例如 <code>2025-05,4.8</code>）覆盖对应指标。</p>
+            <div class="ctl-row"><select id="ovInd"></select><input type="file" id="ovFile" accept=".csv,text/csv"><button class="btn" id="ovUp">上传</button><button class="btn ghost" id="ovClear">清除覆盖</button><span class="hint" id="ovMsg"></span></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel prose" id="paper"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <button class="modal-x" id="modalX" aria-label="关闭">×</button>
+    <div id="modalBody"></div>
+  </div>
+</div>
+<div class="tip" id="tip" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
