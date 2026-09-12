@@ -105,7 +105,8 @@ async function refreshStatus() {
     const st = await api("/api/status"); S.status = st;
     const dot = st.error ? "bad" : (st.ready ? "ok" : "warn");
     const d = st.data || {}, src = d.source || {};
-    $("#sideStatus").innerHTML = `<div><span class="dot ${dot}"></span>${st.ready ? "模型就绪" : st.loading ? `模型计算中 ${Math.round((st.ar_progress || 0) * 100)}%` : "等待加载"}</div>
+    const phase = st.ready ? (st.loading ? `就绪 · 后台${d.stage || "更新中"}` : "模型就绪") : st.loading ? (d.stage ? `${d.stage}…` : `模型计算中 ${Math.round((st.ar_progress || 0) * 100)}%`) : "等待加载";
+    $("#sideStatus").innerHTML = `<div><span class="dot ${dot}"></span>${esc(phase)}</div>
       <div>中国：${esc(src.cn || "—")}</div><div>美国：${esc(src.us || "—")}</div><div>更新：${esc(d.fetched_at || "—")} · 每 ${st.refresh_hours} 小时</div>
       <div><span class="dot ${st.has_key ? "ok" : "bad"}"></span>模型：${(st.models || []).length} 个可用</div>
       ${d.ifind && d.ifind.enabled ? `<div><span class="dot ${d.ifind.last_error ? "warn" : "ok"}"></span>iFinD ${d.ifind.loaded}/${d.ifind.mapped}</div>` : ""}
@@ -391,7 +392,7 @@ function renderSettings() {
   $("#srcInfo").innerHTML = `
     <div class="src-card"><h3>大模型</h3>${(st.models || []).map(m => `<div>● ${esc(m.label)}</div>`).join("") || "<div class='up'>未配置任何模型密钥</div>"}<div class="hint">DeepSeek：DEEPSEEK_API_KEY；Claude：ANTHROPIC_API_KEY（自动发现 Opus/Sonnet 型号）</div></div>
     <div class="src-card"><h3>中国数据</h3><div>${esc(src.cn || "—")}</div><div class="hint">国家统计局 / 海关总署 / 央行口径，经东方财富数据中心；每 ${st.refresh_hours} 小时轮询</div>${d.ifind ? `<div>iFinD EDB：${d.ifind.enabled ? `${d.ifind.loaded}/${d.ifind.mapped} 项${d.ifind.token_expires ? "，token 至 " + esc(d.ifind.token_expires.slice(0, 10)) : ""}${d.ifind.last_error ? "，异常：" + esc(d.ifind.last_error.slice(0, 80)) : ""}` : "未配置（IFIND_REFRESH_TOKEN + IFIND_EDB_MAP）"}</div>` : ""}</div>
-    <div class="src-card"><h3>美国数据</h3><div>${esc(src.us || "—")}</div><div class="hint">FRED（美联储圣路易斯分行），CPI/PCE/非农/失业率/零售/工业/地产/利率等 23 项</div></div>
+    <div class="src-card"><h3>美国数据</h3><div>${esc(src.us || "—")}</div><div class="hint">FRED（美联储圣路易斯分行）为主，东方财富·美国宏观（官方口径转载，2008 年起）为备源；CPI/PCE/非农/失业率/零售/ISM/地产/利率等 25 项</div></div>
     <div class="src-card"><h3>研报</h3><div>东方财富研报中心（宏观研究 + 策略报告），按指标关键词 + 自定义规则召回</div></div>
     ${(d.errors || []).length ? `<div class="src-card"><h3>最近抓取异常</h3>${d.errors.slice(0, 6).map(e => `<div class="up">${esc(e)}</div>`).join("")}</div>` : ""}`;
 }

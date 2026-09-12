@@ -79,19 +79,46 @@ def _em_house(client: httpx.Client):
     return {"fields": ["FIRST_COMHOUSE_SAME"], "rows": rows}
 
 
-def fetch_cn():
+def _parallel(jobs: dict, fn, workers: int = 6, fail_fast_after: int | None = None):
+    """并发抓取；jobs = {key: arg}。fail_fast_after：若前 N 个任务全部为网络错误则放弃其余（避免被墙时逐个超时）。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     out, errors = {}, []
-    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=UA, follow_redirects=True) as c:
-        for rn in EM_FIELDS:
+    keys = list(jobs)
+    if fail_fast_after and keys:
+        probe = keys[:fail_fast_after]
+        with ThreadPoolExecutor(max_workers=len(probe)) as ex:
+            futs = {ex.submit(fn, jobs[k]): k for k in probe}
+            for f in as_completed(futs):
+                k = futs[f]
+                try:
+                    out[k] = f.result()
+                except Exception as e:  # noqa
+                    errors.append(f"{k}: {e}")
+        if not out:
+            errors.append(f"前 {len(probe)} 个请求全部失败，跳过其余 {len(keys) - len(probe)} 个（网络不可达）")
+            return out, errors
+        keys = keys[len(probe):]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(fn, jobs[k]): k for k in keys}
+        for f in as_completed(futs):
+            k = futs[f]
             try:
-                out[rn] = _em_table(rn, c)
+                out[k] = f.result()
             except Exception as e:  # noqa
-                errors.append(f"{rn}: {e}")
-        try:
-            out["EM_HOUSE70"] = _em_house(c)
-        except Exception as e:  # noqa
-            errors.append(f"HOUSE70: {e}")
+                errors.append(f"{k}: {e}")
     return out, errors
+
+
+def fetch_cn():
+    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=UA, follow_redirects=True) as c:
+        jobs = {rn: rn for rn in EM_FIELDS}
+        jobs["EM_HOUSE70"] = "EM_HOUSE70"
+
+        def one(rn):
+            return _em_house(c) if rn == "EM_HOUSE70" else _em_table(rn, c)
+
+        return _parallel(jobs, one, workers=6, fail_fast_after=3)
 
 
 # ------------------------------------------------------------------ FRED
@@ -119,13 +146,34 @@ def _fred_series(sid: str, client: httpx.Client) -> dict[str, float]:
 def fetch_us():
     out, errors = {}, []
     sids = sorted({i["source"]["fred"] for i in INDICATORS if "fred" in i["source"]})
-    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers={"User-Agent": UA["User-Agent"]}, follow_redirects=True) as c:
-        for sid in sids:
-            try:
-                out[sid] = _fred_series(sid, c)
-            except Exception as e:  # noqa
-                errors.append(f"FRED {sid}: {e}")
-    return out, errors
+    with httpx.Client(timeout=min(config.HTTP_TIMEOUT, 20), headers={"User-Agent": UA["User-Agent"]},
+                      follow_redirects=True) as c:
+        out, errors = _parallel({s: s for s in sids}, lambda s: _fred_series(s, c), workers=6, fail_fast_after=2)
+    return out, [f"FRED {e}" for e in errors]
+
+
+# ------------------------------------------------------------------ 东方财富·美国宏观（FRED 不可达时的备源，2008 年起，含发布日期）
+def _em_us_series(code: str, client: httpx.Client) -> dict[str, float]:
+    params = {"columns": "ALL", "pageNumber": 1, "pageSize": 500, "sortColumns": "REPORT_DATE", "sortTypes": -1,
+              "source": "WEB", "client": "WEB", "reportName": "RPT_ECONOMICVALUE_USANEW",
+              "filter": f'(INDICATOR_ID="{code}")'}
+    r = client.get(DC_URL, params=params)
+    r.raise_for_status()
+    j = r.json()
+    if not j.get("success"):
+        raise RuntimeError(f"{code}: {j.get('message')}")
+    out = {}
+    for d in j["result"]["data"]:
+        if d.get("VALUE") is not None:
+            out[d["REPORT_DATE"][:7]] = float(d["VALUE"])
+    return out
+
+
+def fetch_us_em():
+    codes = sorted({i["source"]["em_us"] for i in INDICATORS if "em_us" in i["source"]})
+    with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=UA, follow_redirects=True) as c:
+        out, errors = _parallel({f"EM:{k}": k for k in codes}, lambda k: _em_us_series(k, c), workers=6, fail_fast_after=2)
+    return out, [f"东财美国 {e}" for e in errors]
 
 
 # ------------------------------------------------------------------ 加载
@@ -136,7 +184,8 @@ def _read(p):
         return {}
 
 
-def load(force_live: bool = False):
+def load(force_live: bool = False, network: bool = True):
+    """network=False：只读缓存/快照，秒级返回（启动首屏用）；之后再 network=True 拉实时。"""
     with _lock:
         now = time.time()
         cache = _read(CACHE)
@@ -145,21 +194,33 @@ def load(force_live: bool = False):
         raw["cn"].update(cache.get("cn") or {})
         raw["us"].update(cache.get("us") or {})
         source = {"cn": "内置快照" if not cache.get("cn") else "本地缓存", "us": "内置快照" if not cache.get("us") else "本地缓存"}
-        errors = []
-        if not config.OFFLINE and (force_live or not cache_ok):
+        errors = list(_state.get("errors") or []) if not network else []
+        if network and not config.OFFLINE and (force_live or not cache_ok):
+            _state["stage"] = "抓取东方财富"
             cn, e1 = fetch_cn()
+            _state["stage"] = "抓取 FRED"
             us, e2 = fetch_us()
-            errors = e1 + e2
+            _state["stage"] = "抓取东方财富·美国宏观"
+            us_em, e3 = fetch_us_em()
+            _state["stage"] = None
+            errors = e1 + e2 + e3
             if cn:
                 raw["cn"].update(cn)
                 source["cn"] = "东方财富数据中心（实时）" + ("，部分表回退" if e1 else "")
-            if us:
+            if us or us_em:
                 raw["us"].update(us)
-                source["us"] = "FRED（实时）" + ("，部分序列回退" if e2 else "")
+                raw["us"].update(us_em)
+                parts = []
+                if us:
+                    parts.append("FRED（实时）" + ("，部分序列回退" if e2 else ""))
+                if us_em:
+                    parts.append("东方财富·美国宏观（实时）")
+                source["us"] = " + ".join(parts)
+                us = us or us_em
             if cn or us:
                 CACHE.write_text(json.dumps({"cn": raw["cn"], "us": raw["us"]}, ensure_ascii=False), encoding="utf-8")
         # iFinD EDB 覆盖
-        if ifind.enabled() and not config.OFFLINE:
+        if network and ifind.enabled() and not config.OFFLINE:
             try:
                 ser = ifind.load_all()
                 if ser:
@@ -249,16 +310,22 @@ def build_series(ind_id: str, raw=None):
         if not tbl:
             return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
         data = {row[0]: float(row[1]) for row in tbl["rows"] if row[1] is not None}
-    elif "fred" in src:
-        ser = (raw.get("us") or {}).get(src["fred"])
-        if not ser:
-            return {"months": [], "values": [], "notes": ["FRED 序列尚未获取（服务器需能访问 fred.stlouisfed.org）"]}
-        monthly = _monthly_from_fred(ser, src.get("agg", "last"))
-        if ind["freq"] == "Q":
-            # FRED 季度数据以季度首月标记，转为季末月
-            monthly = {f"{m[:4]}-{int(m[5:7]) + 2:02d}": v for m, v in monthly.items()}
-        data = _transform(monthly, src.get("transform", "level"), ind["freq"], src.get("scale", 1.0))
-        notes.append("来源：FRED（" + src["fred"] + "）")
+    elif "fred" in src or "em_us" in src:
+        ser = (raw.get("us") or {}).get(src["fred"]) if "fred" in src else None
+        em = (raw.get("us") or {}).get("EM:" + src["em_us"]) if "em_us" in src else None
+        if em:  # 优先官方发布口径（与研报/新闻中的 headline 数字一致），FRED 用于无东财映射的序列
+            sc = src.get("em_scale", 1.0)
+            data = {m: round(float(v) * sc, 4) for m, v in em.items()}
+            notes.append("来源：东方财富·美国宏观（" + src["em_us"] + "，官方发布口径转载）")
+        elif ser:
+            monthly = _monthly_from_fred(ser, src.get("agg", "last"))
+            if ind["freq"] == "Q":
+                # FRED 季度数据以季度首月标记，转为季末月
+                monthly = {f"{m[:4]}-{int(m[5:7]) + 2:02d}": v for m, v in monthly.items()}
+            data = _transform(monthly, src.get("transform", "level"), ind["freq"], src.get("scale", 1.0))
+            notes.append("来源：FRED（" + src["fred"] + "）")
+        else:
+            return {"months": [], "values": [], "notes": ["美国序列尚未获取（FRED / 东方财富均不可达）"]}
     ov = OVERRIDE_DIR / f"{ind_id}.csv"
     if ov.exists():
         data.update(read_override(ov))
@@ -323,7 +390,8 @@ def clear_override(ind_id: str):
 
 
 def status():
-    return {"source": _state["source"], "fetched_at": _state["fetched_at"], "errors": _state["errors"], "ifind": ifind.status()}
+    return {"source": _state["source"], "fetched_at": _state["fetched_at"], "errors": _state["errors"],
+            "stage": _state.get("stage"), "ifind": ifind.status()}
 
 
 def export_csv(series: dict, country=None) -> str:

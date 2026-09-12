@@ -94,12 +94,12 @@ def persist_preds(ind_id):
 
 
 # ------------------------------------------------------------------ 加载
-def load_all(force_live=False, background=True):
+def load_all(force_live=False, background=True, network=True):
     def job():
         try:
             with _lock:
                 _state["loading"] = True
-            raw = datasource.load(force_live=force_live)
+            raw = datasource.load(force_live=force_live, network=network)
             series = {i["id"]: datasource.build_series(i["id"], raw) for i in INDICATORS}
             old_pending = dict(_state["pending"])
             with _lock:
@@ -134,6 +134,16 @@ def load_all(force_live=False, background=True):
         threading.Thread(target=job, daemon=True).start()
     else:
         job()
+
+
+def boot():
+    """启动：先用快照/缓存秒级就绪（模型走种子缓存），再在后台拉实时数据并重算。"""
+    def job():
+        load_all(force_live=False, background=False, network=False)
+        if not config.OFFLINE:
+            load_all(force_live=False, background=False, network=True)
+
+    threading.Thread(target=job, daemon=True).start()
 
 
 def _load_ar_cache(ind_id):

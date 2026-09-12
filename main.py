@@ -28,7 +28,7 @@ def boot():
     if _started.is_set():
         return
     _started.set()
-    engine.load_all(force_live=False, background=True)
+    engine.boot()
     threading.Thread(target=engine.auto_refresh_loop, daemon=True).start()
 
 
