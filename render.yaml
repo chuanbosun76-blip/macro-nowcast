@@ -3,14 +3,18 @@ services:
     name: macro-nowcast
     runtime: docker
     region: singapore
-    plan: free
+    plan: starter
     healthCheckPath: /api/health
     envVars:
       - key: DEEPSEEK_API_KEY
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: ACCESS_PASSWORD
         sync: false
-      - key: DEEPSEEK_MODEL
-        value: deepseek-v4-pro
       - key: DATA_DIR
-        value: /tmp/nowcast-data
+        value: /data
+    disk:
+      name: nowcast-data
+      mountPath: /data
+      sizeGB: 1

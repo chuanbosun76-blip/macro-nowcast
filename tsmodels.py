@@ -292,16 +292,26 @@ def choose_d(y) -> tuple[int, float]:
     return (0 if p < 0.05 else 1), p
 
 
+def spec_from_label(label: str):
+    """'(p,d,q)' 或 '(p,d,q)(P,0,Q,12)' → SarimaxSpec"""
+    import re
+    nums = [int(x) for x in re.findall(r"-?\d+", label)]
+    if len(nums) >= 7:
+        return SarimaxSpec(nums[0], nums[1], nums[2], nums[3], nums[5], nums[6])
+    return SarimaxSpec(nums[0], nums[1], nums[2])
+
+
 def expanding_backtest(y, months, start_idx, exog=None, seasonal=False, reselect_month="01", min_obs=36,
-                       progress=None, force_d=None):
+                       progress=None, force_d=None, initial_spec=None):
     """扩展窗口：对每个 t≥start_idx，仅用 y[:t] 估计并预测 y[t]；t=len(y) 为实时预测（下一期）。
     exog 需比 y 多 1 行（下一期外生变量已知：春节日期）。每年 1 月重选阶数，其余月份沿用阶数、重估参数。
+    initial_spec：增量计算时沿用上次缓存的阶数（直到下一个 1 月再重选）。
     """
     y = np.asarray(y, dtype=float)
     n = len(y)
     E = None if exog is None else np.asarray(exog, dtype=float).reshape(n + 1, -1)
     preds, orders = {}, {}
-    spec, fit, d = None, None, 0
+    spec, fit, d = initial_spec, None, 0
     start_idx = max(start_idx, min_obs)
     for t in range(start_idx, n + 1):
         yt = y[:t]
@@ -311,7 +321,7 @@ def expanding_backtest(y, months, start_idx, exog=None, seasonal=False, reselect
             d = force_d if force_d is not None else choose_d(yt)[0]
             spec, fit = select_order(yt, et, d=d, seasonal=seasonal)
         else:
-            fit = _fit_with_level(yt, spec, et, start_params=fit.params)
+            fit = _fit_with_level(yt, spec, et, start_params=fit.params if fit is not None else None)
         xn = None if E is None else E[t]
         try:
             preds[mon] = forecast_one(fit, xn)

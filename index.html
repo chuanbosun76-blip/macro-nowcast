@@ -3,155 +3,147 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>观数 · 宏观实时预测研究台</title>
+<title>观数 · 宏观预测平台</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="shell">
   <aside class="side">
-    <div class="brand">
-      <div class="seal">观</div>
-      <div><div class="brand-t">观数</div><div class="brand-s">MACRO NOWCAST</div></div>
-    </div>
+    <div class="brand"><div class="seal">观</div><div><div class="brand-t">观数</div><div class="brand-s">MACRO NOWCAST</div></div></div>
     <nav id="nav">
-      <a href="#workbench" data-v="workbench"><b>预测工作台</b><span>三法并行 · 当期预测</span></a>
-      <a href="#reports" data-v="reports"><b>数据与研报</b><span>序列 · 研报召回</span></a>
-      <a href="#backtest" data-v="backtest"><b>滚动回测</b><span>扩展窗口 · 相关性</span></a>
-      <a href="#archive" data-v="archive"><b>预测档案</b><span>DeepSeek 调用记录</span></a>
-      <a href="#ask" data-v="ask"><b>问 AI</b><span>基于最新数据的研判问答</span></a>
-      <a href="#method" data-v="method"><b>方法与设置</b><span>原文框架 · 口令</span></a>
+      <a href="#overview" data-v="overview"><b>总览</b><span>最新数据 · 当期预测</span></a>
+      <a href="#predict" data-v="predict"><b>预测中心</b><span>AI 研判 · 更新数据</span></a>
+      <a href="#data" data-v="data"><b>数据库</b><span>中美宏观 · 10 年+ 历史</span></a>
+      <a href="#reports" data-v="reports"><b>研报</b><span>召回 · 直达链接</span></a>
+      <a href="#backtest" data-v="backtest"><b>回测</b><span>三法对照 · 相关性</span></a>
+      <a href="#archive" data-v="archive"><b>预测档案</b><span>每次研判的依据</span></a>
+      <a href="#ask" data-v="ask"><b>问 AI</b><span>基于最新数据问答</span></a>
+      <a href="#settings" data-v="settings"><b>设置</b><span>预测要求 · 数据源 · 模型</span></a>
     </nav>
     <div class="side-foot" id="sideStatus">连接中…</div>
   </aside>
 
   <main>
     <header class="topbar">
-      <div>
-        <div class="eyebrow">量化配置 · 宏观实时预测</div>
-        <h1 id="viewTitle">预测工作台</h1>
+      <div><div class="eyebrow">MACRO NOWCAST · 中国 / 美国</div><h1 id="viewTitle">总览</h1></div>
+      <div class="topright">
+        <div class="seg" id="countrySeg"><button data-c="CN" class="on">中国</button><button data-c="US">美国</button></div>
+        <div class="topmeta" id="topMeta"></div>
       </div>
-      <div class="topmeta" id="topMeta"></div>
     </header>
 
-    <!-- 预测工作台 -->
-    <section class="view" id="v-workbench">
-      <div class="panel flow">
-        <h2>决策流程</h2>
-        <ol class="steps">
-          <li><em>1</em><div><b>沿用上期</b><p>与上期值相关性 ≥ 0.8：不建模，直接沿用最新公布值</p></div></li>
-          <li><em>2</em><div><b>SARIMAX</b><p>平稳、自相关、弱趋势：扩展窗口自回归，春节假期占比作外生变量</p></div></li>
-          <li><em>3</em><div><b>DeepSeek 读研报</b><p>弱相关、外生冲击多：解析当月宏观/策略研报标题，输出数值与理由</p></div></li>
-        </ol>
-      </div>
-
-      <div class="panel controls">
-        <h2>运行设置</h2>
-        <div class="ctl-row">
-          <label>LLM 输入<select id="modeSel"></select></label>
-          <label>模型<select id="modelSel"></select></label>
-          <button class="btn primary" id="updateAll">⟳ 更新最新数据并预测全部指标</button>
-          <button class="btn" id="runAll">仅运行 DeepSeek 预测</button>
-          <span class="hint" id="runHint">先从统计局/海关/央行口径（东方财富）拉取最新数据、重算模型，再逐个调用 DeepSeek；约 1–3 分钟</span>
-        </div>
-        <div id="jobBox"></div>
-      </div>
-
-      <h2 class="sec">指标看板 <small>· 需实时预测</small></h2>
-      <div class="cards" id="cardsNow"></div>
-      <h2 class="sec">高相关组 <small>· 原文“直接沿用上期”</small></h2>
-      <div class="cards compact" id="cardsPersist"></div>
+    <!-- 总览 -->
+    <section class="view" id="v-overview">
+      <div class="kpis" id="kpis"></div>
+      <div id="ovGroups"><div class="skel">加载中…</div></div>
     </section>
 
-    <!-- 数据与研报 -->
-    <section class="view" id="v-reports" hidden>
+    <!-- 预测中心 -->
+    <section class="view" id="v-predict" hidden>
       <div class="panel">
-        <h2>最新数据总表 <small id="tblMeta"></small></h2>
+        <h2>运行预测</h2>
         <div class="ctl-row">
-          <label>显示<select id="tblMonths"><option value="12">近 12 个月</option><option value="24" selected>近 24 个月</option><option value="60">近 5 年</option><option value="240">全部</option></select></label>
-          <a class="btn ghost" id="csvAll" href="/api/data.csv">下载全部数据 CSV</a>
-          <button class="btn ghost" id="refreshData">⟳ 立即刷新数据源</button>
-          <span class="hint">来源：东方财富数据中心（国家统计局 / 海关总署 / 央行口径），服务端每小时自动轮询</span>
+          <label>模型<select id="pModel"></select></label>
+          <label>输入<select id="pMode"></select></label>
+          <button class="btn primary" id="pUpdate">⟳ 更新最新数据并预测全部待测指标</button>
+          <button class="btn" id="pRun">仅对勾选指标运行 AI 研判</button>
+        </div>
+        <div class="chips" id="pInds"></div>
+        <p class="hint">流程：拉取最新官方数据 → 增量重算 SARIMAX → 召回当月研报 → AI 结合数据、统计模型与研报输出数值、区间、驱动因素、传导机制与风险。每个指标约 15–60 秒。</p>
+        <div id="pJob"></div>
+      </div>
+      <div class="panel"><h2>最新研判 <small>· 当期实时预测（点击展开原理与支撑）</small></h2><div id="pResults"><div class="skel">暂无</div></div></div>
+    </section>
+
+    <!-- 数据库 -->
+    <section class="view" id="v-data" hidden>
+      <div class="panel">
+        <h2>宏观数据库 <small id="tblMeta"></small></h2>
+        <div class="ctl-row">
+          <label>频率<select id="tblFreq"><option value="M">月度</option><option value="Q">季度</option></select></label>
+          <label>范围<select id="tblMonths"><option value="12">近 12 期</option><option value="24" selected>近 24 期</option><option value="60">近 5 年</option><option value="120">近 10 年</option><option value="400">全部</option></select></label>
+          <a class="btn ghost" id="csvAll" href="/api/data.csv">下载 CSV</a>
+          <button class="btn ghost" id="refreshData">⟳ 刷新数据源</button>
+          <span class="hint" id="tblSrc"></span>
         </div>
         <div class="tbl-wrap"><table class="data" id="dataTable"></table></div>
       </div>
       <div class="panel">
         <h2>序列走势</h2>
-        <div class="ctl-row">
-          <label>指标<select id="serInd"></select></label>
-          <label>起始<input type="month" id="serFrom" value="2019-01"></label>
-          <span class="hint" id="serNotes"></span>
-        </div>
+        <div class="ctl-row"><label>指标<select id="serInd"></select></label><label>起始<input type="month" id="serFrom" value="2016-01"></label><span class="hint" id="serNotes"></span></div>
         <div class="chart" id="serChart"></div>
         <div class="diag" id="serDiag"></div>
       </div>
+    </section>
+
+    <!-- 研报 -->
+    <section class="view" id="v-reports" hidden>
       <div class="panel">
         <h2>研报召回</h2>
         <div class="ctl-row">
           <label>指标<select id="repInd"></select></label>
           <label>月份<input type="month" id="repMonth"></label>
-          <label>输入<select id="repMode"></select></label>
-          <button class="btn" id="repGo">召回当月研报</button>
-          <span class="hint">来源：东方财富研报中心（宏观研究 + 策略报告），按指标关键词召回、标题去重</span>
+          <label>内容<select id="repMode"><option value="title">标题</option><option value="chunk">标题 + 正文片段</option></select></label>
+          <button class="btn" id="repGo">召回</button>
+          <span class="hint">来源：东方财富研报中心（宏观研究 + 策略报告）；点击标题直达原文</span>
         </div>
-        <div id="repOut" class="rep-out"><p class="muted">选择指标与月份后点击“召回当月研报”。</p></div>
+        <div id="repOut" class="rep-out"><p class="muted">选择指标与月份后点击“召回”。</p></div>
+      </div>
+      <div class="panel">
+        <h2>召回规则 <small>· 告诉系统你想要什么研报，规则会同时作用于预测</small></h2>
+        <div class="set-grid">
+          <label class="col">额外关键词（逗号分隔，命中任一即召回）<input id="rInclude" placeholder="例如：抢出口, 关税豁免, 对美出口"></label>
+          <label class="col">排除关键词<input id="rExclude" placeholder="例如：周报, 日报, 晨会"></label>
+          <label class="col">只看这些机构（留空=全部）<input id="rOrgs" placeholder="例如：中金, 中信, 国信, 华泰"></label>
+          <label class="col">最多条数<input id="rLimit" type="number" value="150" min="10" max="400"></label>
+        </div>
+        <div class="ctl-row"><button class="btn primary" id="rSave">保存规则</button><span class="hint" id="rMsg"></span></div>
       </div>
     </section>
 
-    <!-- 滚动回测 -->
+    <!-- 回测 -->
     <section class="view" id="v-backtest" hidden>
       <div class="panel">
-        <h2>回测对比</h2>
+        <h2>回测对比 <small>· 预测值与真实值的相关系数，扩展窗口，越高越好</small></h2>
         <div class="ctl-row">
-          <label>起<input type="month" id="btFrom"></label>
-          <label>止<input type="month" id="btTo"></label>
-          <label>LLM 模型<select id="btModel"><option value="">全部</option></select></label>
+          <label>起<input type="month" id="btFrom"></label><label>止<input type="month" id="btTo"></label>
+          <label>AI 模型<select id="btModel"><option value="">全部</option></select></label>
           <button class="btn" id="btGo">重新计算</button>
-          <span class="hint">指标为预测值与真实值的相关系数（原文口径）；灰色小字为中金原文结果</span>
         </div>
         <div class="tbl-wrap"><table class="bt" id="btTable"></table></div>
       </div>
       <div class="panel">
         <h2>曲线对照</h2>
-        <div class="ctl-row">
-          <label>指标<select id="btInd"></select></label>
-          <span class="legend" id="btLegend"></span>
-        </div>
+        <div class="ctl-row"><label>指标<select id="btInd"></select></label><span class="legend" id="btLegend"></span></div>
         <div class="chart" id="btChart"></div>
       </div>
       <div class="panel">
-        <h2>文本回测</h2>
+        <h2>AI 历史回测 <small>· 用每月当时可得的研报与数据逐月预测，得到 AI 那一列的相关性</small></h2>
         <div class="ctl-row">
-          <label>指标<select id="llmInd"></select></label>
-          <label>起<input type="month" id="llmFrom" value="2024-01"></label>
-          <label>止<input type="month" id="llmTo"></label>
+          <label>起<input type="month" id="llmFrom" value="2024-01"></label><label>止<input type="month" id="llmTo"></label>
           <label>模型<select id="llmModel"></select></label>
+          <label>输入<select id="llmMode"></select></label>
         </div>
-        <div class="ctl-row modes" id="llmModes"></div>
-        <div class="ctl-row">
-          <button class="btn primary" id="llmGo">运行 DeepSeek 历史回测</button>
-          <span class="hint">逐月用当月研报文本预测，已跑过的月份自动跳过；研报库自 2017 年起可得</span>
-        </div>
+        <div class="chips" id="llmInds"></div>
+        <div class="ctl-row"><button class="btn primary" id="llmGo">运行 AI 回测</button><span class="hint">已跑过的月份自动跳过；研报库自 2017 年起</span></div>
         <div id="llmJob"></div>
       </div>
       <div class="panel">
         <h2>泄漏检验</h2>
-        <div class="ctl-row">
-          <label>指标<select id="leakInd"></select></label>
-          <label>切分月<input type="month" id="leakSplit"></label>
-          <button class="btn" id="leakGo">检验</button>
-          <span class="hint">对比模型预训练截止前后 LLM 预测表现，判断回测是否受“记住未来”影响</span>
-        </div>
+        <div class="ctl-row"><label>指标<select id="leakInd"></select></label><label>切分月<input type="month" id="leakSplit"></label><button class="btn" id="leakGo">检验</button>
+          <span class="hint">对比模型训练截止前后的表现，判断回测是否受“记住未来”影响</span></div>
         <div id="leakOut"></div>
       </div>
     </section>
 
-    <!-- 预测档案 -->
+    <!-- 档案 -->
     <section class="view" id="v-archive" hidden>
       <div class="panel">
-        <h2>预测档案</h2>
+        <h2>预测档案 <small id="arcMeta"></small></h2>
         <div class="ctl-row">
           <label>指标<select id="arcInd"><option value="">全部</option></select></label>
-          <label>类型<select id="arcSrc"><option value="">全部</option><option value="live">实时</option><option value="backtest">回测</option></select></label>
+          <label>类型<select id="arcSrc"><option value="">全部</option><option value="live">实时预测</option><option value="backtest">回测</option></select></label>
+          <label><input type="checkbox" id="arcOk" checked> 只看成功</label>
           <button class="btn" id="arcGo">刷新</button>
           <a class="btn ghost" id="arcCsv" href="/api/runs.csv">导出 CSV</a>
         </div>
@@ -162,53 +154,52 @@
     <!-- 问 AI -->
     <section class="view" id="v-ask" hidden>
       <div class="panel ask">
-        <h2>问 AI <small>· DeepSeek，已注入全部指标最新数据与三种方法的当期预测</small></h2>
-        <div class="ctl-row">
-          <label>模型<select id="askModel"></select></label>
-          <button class="btn ghost sm" id="askClear">清空对话</button>
-          <span class="hint">示例：下月出口同比大概多少？为什么 CPI 环比预测转正？信贷弱在哪里？</span>
-        </div>
-        <div class="chat" id="chatBox"><div class="msg ai">你好，我是观数研究助手。我已读取全部宏观指标的最新公布值、SARIMAX 与 DeepSeek 的当期预测及回测表现，可以直接问我数据、预测和逻辑。</div></div>
-        <div class="ask-row">
-          <textarea id="askInput" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
-          <button class="btn primary" id="askSend">发送</button>
-        </div>
+        <h2>问 AI <small>· 已注入中美全部指标最新数据、三种方法的当期预测与回测表现</small></h2>
+        <div class="ctl-row"><label>模型<select id="askModel"></select></label><button class="btn ghost sm" id="askClear">清空对话</button>
+          <span class="hint">示例：下月美国非农大概多少？中国出口高增长能持续吗？CPI 环比预测转正的依据是什么？</span></div>
+        <div class="chat" id="chatBox"><div class="msg ai">你好，我是观数研究助手。我已读取中国与美国全部宏观指标的最新公布值、SARIMAX 与 AI 的当期预测及回测表现，可以直接问我数据、预测和逻辑。</div></div>
+        <div class="ask-row"><textarea id="askInput" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea><button class="btn primary" id="askSend">发送</button></div>
       </div>
     </section>
 
-    <!-- 方法与设置 -->
-    <section class="view" id="v-method" hidden>
+    <!-- 设置 -->
+    <section class="view" id="v-settings" hidden>
       <div class="panel">
-        <h2>系统设置</h2>
-        <div class="set-grid">
-          <div>
-            <h3>访问口令</h3>
-            <p class="muted">公网部署时，运行 DeepSeek、刷新数据、上传数据需口令（服务端环境变量 ACCESS_PASSWORD）。口令仅保存在本浏览器。</p>
-            <div class="ctl-row"><input type="password" id="pwd" placeholder="输入访问口令"><button class="btn" id="pwdSave">保存并验证</button><span class="hint" id="pwdMsg"></span></div>
-          </div>
-          <div>
-            <h3>数据刷新</h3>
-            <p class="muted" id="dataInfo"></p>
-            <div class="ctl-row"><button class="btn" id="refresh">从东方财富重新抓取并重算模型</button></div>
-          </div>
-          <div>
-            <h3>数据覆盖</h3>
-            <p class="muted">可上传 Wind 等口径的 CSV（两列：月份,数值，例如 <code>2025-05,4.8</code>）覆盖对应指标。</p>
-            <div class="ctl-row"><select id="ovInd"></select><input type="file" id="ovFile" accept=".csv,text/csv"><button class="btn" id="ovUp">上传</button><button class="btn ghost" id="ovClear">清除覆盖</button><span class="hint" id="ovMsg"></span></div>
-          </div>
+        <h2>预测要求 <small>· 写给 AI 的附加指令，作用于所有预测与问答</small></h2>
+        <textarea id="sReq" rows="6" placeholder="例如：
+- 重点关注关税政策变化对出口的影响，引用最新的中美谈判进展
+- 对 CPI 预测必须拆分食品、能源、核心三项分别说明
+- 预测区间宽度不超过上期值的 ±30%
+- 优先引用中金、中信、华泰、国信的观点"></textarea>
+        <div class="ctl-row">
+          <label>默认模型<select id="sModel"></select></label>
+          <label><input type="checkbox" id="sAuto"> 新数据到达后自动运行 AI 预测</label>
+          <button class="btn primary" id="sSave">保存</button><span class="hint" id="sMsg"></span>
         </div>
       </div>
-      <div class="panel prose" id="paper"></div>
+      <div class="panel">
+        <h2>模型与数据源</h2>
+        <div class="set-grid" id="srcInfo"></div>
+      </div>
+      <div class="panel">
+        <h2>访问口令与数据覆盖</h2>
+        <div class="set-grid">
+          <div><h3>访问口令</h3><p class="muted">运行 AI、刷新数据、改设置需口令（服务端 ACCESS_PASSWORD）；口令只存在本浏览器。</p>
+            <div class="ctl-row"><input type="password" id="pwd" placeholder="输入访问口令"><button class="btn" id="pwdSave">保存并验证</button><span class="hint" id="pwdMsg"></span></div></div>
+          <div><h3>上传数据覆盖</h3><p class="muted">上传 Wind / iFinD 导出的 CSV（两列：月份,数值）覆盖对应指标。</p>
+            <div class="ctl-row"><select id="ovInd"></select><input type="file" id="ovFile" accept=".csv,text/csv"><button class="btn" id="ovUp">上传</button><button class="btn ghost" id="ovClear">清除</button><span class="hint" id="ovMsg"></span></div></div>
+        </div>
+      </div>
+      <div class="panel prose">
+        <h2>方法说明</h2>
+        <p>每个待测指标同时给出三种方法的当期预测并按回测择优：<b>沿用上期</b>（惯性极强的指标）、<b>SARIMAX</b>（季节性 + 春节外生变量的时间序列模型，扩展窗口逐月重估）、<b>AI 研判</b>（大模型读取目标指标历史、关联指标、统计模型参考与当月研报，输出数值、区间、驱动因素、传导机制、证据与风险）。所有预测记录可在档案中追溯到具体研报与 Prompt。数据：中国来自国家统计局 / 海关总署 / 央行口径（东方财富数据中心），美国来自 FRED；服务端每小时轮询，有新数据自动更新并可自动预测。</p>
+      </div>
     </section>
   </main>
 </div>
 
-<div class="modal" id="modal" hidden>
-  <div class="modal-card">
-    <button class="modal-x" id="modalX" aria-label="关闭">×</button>
-    <div id="modalBody"></div>
-  </div>
-</div>
+<div class="drawer" id="drawer" hidden><div class="drawer-card"><button class="modal-x" id="drawerX" aria-label="关闭">×</button><div id="drawerBody"></div></div></div>
+<div class="modal" id="modal" hidden><div class="modal-card"><button class="modal-x" id="modalX" aria-label="关闭">×</button><div id="modalBody"></div></div></div>
 <div class="tip" id="tip" hidden></div>
 <script src="/static/app.js"></script>
 </body>

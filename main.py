@@ -1,21 +1,26 @@
-"""Web 服务入口（Flask）。启动：python run.py 或 gunicorn -w 1 --threads 16 app.main:app"""
+"""Web 服务入口（Flask）。本地：python main.py；生产：gunicorn -w 1 --threads 16 main:app"""
 from __future__ import annotations
 
 import csv
 import hmac
 import io
 import threading
+from datetime import date
 from functools import wraps
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-import config, datasource, engine, llm, reports, store
-from indicators import BY_ID, INDICATORS, LLM_MODES
+import config
+import datasource
+import engine
+import llm
+import reports
+import store
+from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES
 
 STATIC = config.ROOT
 app = Flask(__name__, static_folder=None)
 app.json.ensure_ascii = False
-
 _started = threading.Event()
 
 
@@ -30,10 +35,8 @@ def boot():
 def need_auth(fn):
     @wraps(fn)
     def w(*a, **k):
-        if config.ACCESS_PASSWORD:
-            given = request.headers.get("X-Access-Password", "")
-            if not hmac.compare_digest(given, config.ACCESS_PASSWORD):
-                return jsonify({"error": "需要访问口令（在“方法与设置”页输入）"}), 401
+        if config.ACCESS_PASSWORD and not hmac.compare_digest(request.headers.get("X-Access-Password", ""), config.ACCESS_PASSWORD):
+            return jsonify({"error": "需要访问口令"}), 401
         return fn(*a, **k)
     return w
 
@@ -66,8 +69,7 @@ def api_status():
 
 @app.get("/api/meta")
 def meta():
-    return jsonify({"indicators": [{k: v for k, v in i.items()} for i in INDICATORS], "modes": LLM_MODES,
-                    **engine.status()})
+    return jsonify({"indicators": INDICATORS, "modes": LLM_MODES, "groups": GROUPS_ORDER, **engine.status()})
 
 
 @app.get("/api/overview")
@@ -75,7 +77,7 @@ def api_overview():
     nr = not_ready()
     if nr:
         return nr
-    return jsonify({"rows": engine.overview(), "status": engine.status()})
+    return jsonify({"rows": engine.overview(request.args.get("country") or None), "status": engine.status()})
 
 
 @app.get("/api/series/<ind_id>")
@@ -88,13 +90,30 @@ def api_series(ind_id):
     return jsonify(engine.series_payload(ind_id, request.args.get("model") or None))
 
 
+@app.get("/api/table")
+def api_table():
+    nr = not_ready()
+    if nr:
+        return nr
+    return jsonify(engine.data_table(request.args.get("country") or None, int(request.args.get("months", 24)), request.args.get("freq", "M")))
+
+
+@app.get("/api/data.csv")
+def api_data_csv():
+    nr = not_ready()
+    if nr:
+        return nr
+    return Response(datasource.export_csv(engine._state["series"], request.args.get("country") or None), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=macro_data.csv"})
+
+
 @app.get("/api/backtest")
 def api_backtest():
     nr = not_ready()
     if nr:
         return nr
-    return jsonify({"rows": engine.backtest_table(request.args.get("start"), request.args.get("end"),
-                                                   request.args.get("model") or None), "status": engine.status()})
+    return jsonify({"rows": engine.backtest_table(request.args.get("start"), request.args.get("end"), request.args.get("model") or None,
+                                                   request.args.get("country") or None), "status": engine.status()})
 
 
 @app.get("/api/leak/<ind_id>")
@@ -102,8 +121,7 @@ def api_leak(ind_id):
     nr = not_ready()
     if nr:
         return nr
-    return jsonify(engine.leak_check(ind_id, request.args.get("mode", "title"), request.args.get("model") or None,
-                                     request.args.get("split") or None))
+    return jsonify(engine.leak_check(ind_id, request.args.get("mode", "title"), request.args.get("model") or None, request.args.get("split") or None))
 
 
 @app.get("/api/reports")
@@ -114,11 +132,16 @@ def api_reports():
     if ind_id not in BY_ID or not month:
         return jsonify({"error": "参数错误"}), 400
     try:
-        cutoff = min(engine.month_end(month), __import__("datetime").date.today().isoformat())
-        combined, sel, info = engine.prepare_text(ind_id, month, mode, cutoff if cutoff < engine.month_end(month) else None)
+        cutoff = min(engine.month_end(month), date.today().isoformat())
+        items = reports.fetch_month(month, cutoff if cutoff < engine.month_end(month) else None)
+        sel, supplemented = reports.select_titles(items, ind_id)
+        info = {"n_all": len(items), "n_titles": len(sel), "supplemented": supplemented, "chunks": [], "dropped": 0}
+        if mode == "chunk":
+            chunks, dropped = reports.select_chunks(sel, ind_id)
+            info.update(chunks=chunks, dropped=dropped)
     except Exception as e:  # noqa
         return jsonify({"error": f"研报抓取失败：{e}"}), 502
-    return jsonify({"month": month, "indicator": ind_id, "titles": sel, "info": info, "combined": combined})
+    return jsonify({"month": month, "indicator": ind_id, "titles": sel, "info": info, "rules": reports.rules()})
 
 
 @app.post("/api/nowcast")
@@ -135,11 +158,11 @@ def api_nowcast():
     items = []
     for i in inds:
         pm = engine.pending_month(i)
+        if not pm:
+            continue
         month = j.get("month") or pm
-        source = "live" if month >= pm else "backtest"
-        items.append((i, month, mode, source))
-    job = engine.start_job(items, j.get("model"), force=True, label="实时预测")
-    return jsonify(job)
+        items.append((i, month, mode, "live" if month >= pm else "backtest"))
+    return jsonify(engine.start_job(items, j.get("model"), force=True, label="实时预测"))
 
 
 @app.post("/api/backtest/llm")
@@ -149,15 +172,30 @@ def api_backtest_llm():
     if nr:
         return nr
     j = request.get_json(force=True) or {}
-    ind_id = j.get("indicator")
+    ids = j.get("indicators") or [j.get("indicator")]
     modes = j.get("modes") or [j.get("mode", "title")]
-    if ind_id not in BY_ID or any(m not in LLM_MODES for m in modes):
+    if any(i not in BY_ID for i in ids) or any(m not in LLM_MODES for m in modes):
         return jsonify({"error": "参数错误"}), 400
-    months = engine.backtest_months(ind_id, j.get("start", "2024-01"), j.get("end", "9999-12"))
-    if len(months) > 240:
-        return jsonify({"error": "单次最多 240 个月"}), 400
-    items = [(ind_id, m, mode, "backtest") for mode in modes for m in months]
-    return jsonify(engine.start_job(items, j.get("model"), force=bool(j.get("force")), label="LLM 回测"))
+    items = []
+    for i in ids:
+        for mode in modes:
+            for m in engine.backtest_months(i, j.get("start", "2024-01"), j.get("end", "9999-12")):
+                items.append((i, m, mode, "backtest"))
+    if len(items) > 600:
+        return jsonify({"error": f"单次最多 600 次调用（当前 {len(items)}），请缩小区间或指标数"}), 400
+    return jsonify(engine.start_job(items, j.get("model"), force=bool(j.get("force")), label="AI 回测"))
+
+
+@app.post("/api/update_and_predict")
+@need_auth
+def api_update_and_predict():
+    j = request.get_json(force=True) or {}
+    return jsonify(engine.update_and_predict(j.get("mode", "title"), j.get("model"), j.get("country"), j.get("indicators")))
+
+
+@app.get("/api/update_status")
+def api_update_status():
+    return jsonify({**engine.UPDATE, "status": engine.status()})
 
 
 @app.get("/api/jobs")
@@ -173,8 +211,9 @@ def api_job(jid):
 
 @app.get("/api/runs")
 def api_runs():
-    return jsonify(store.list_runs(request.args.get("indicator") or None, request.args.get("source") or None,
-                                   request.args.get("mode") or None, int(request.args.get("limit", 300))))
+    a = request.args
+    return jsonify(store.list_runs(a.get("indicator") or None, a.get("source") or None, a.get("mode") or None, a.get("country") or None,
+                                   int(a.get("limit", 300)), ok_only=a.get("ok") == "1"))
 
 
 @app.get("/api/runs/<int:rid>")
@@ -187,14 +226,51 @@ def api_run(rid):
 def api_runs_csv():
     rows = store.list_runs(request.args.get("indicator") or None, limit=100000)
     buf = io.StringIO()
-    cols = ["id", "created_at", "source", "indicator", "target_month", "mode", "model", "value", "ar_ref", "n_titles",
-            "n_chunks", "reason", "error"]
+    cols = ["id", "created_at", "source", "indicator", "target_month", "mode", "model", "value", "low", "high", "confidence", "ar_ref", "n_titles", "reason", "error"]
     w = csv.writer(buf)
     w.writerow(cols)
     for r in rows:
         w.writerow([r.get(c) for c in cols])
-    return Response("﻿" + buf.getvalue(), mimetype="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=nowcast_runs.csv"})
+    return Response("﻿" + buf.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=predictions.csv"})
+
+
+@app.get("/api/settings")
+def api_settings_get():
+    s = store.all_settings()
+    return jsonify({"predict_requirements": s.get("predict_requirements", ""), "recall_rules": reports.rules(),
+                    "auto_predict": bool(s.get("auto_predict", config.AUTO_PREDICT)), "default_model": s.get("default_model") or llm.default_model()})
+
+
+@app.post("/api/settings")
+@need_auth
+def api_settings_set():
+    j = request.get_json(force=True) or {}
+    for k in ("predict_requirements", "recall_rules", "auto_predict", "default_model"):
+        if k in j:
+            store.set_setting(k, j[k])
+    return api_settings_get()
+
+
+@app.post("/api/ask")
+@need_auth
+def api_ask():
+    nr = not_ready()
+    if nr:
+        return nr
+    j = request.get_json(force=True) or {}
+    msgs = j.get("messages") or []
+    if not msgs:
+        return jsonify({"error": "缺少 messages"}), 400
+    msgs = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))[:8000]} for m in msgs[-12:]]
+    custom = store.get_setting("predict_requirements", "") or ""
+    system = ("你是“观数”宏观研究助手，服务于投资经理。基于下方最新宏观数据（中国、美国）与模型预测作答：引用具体数值与月份；"
+              "对未来判断给出方向、幅度、依据与风险；区分事实与观点；数据未覆盖的内容明确说明。中文、结论先行、简洁。\n"
+              + (f"用户附加要求：{custom}\n" if custom else "") + "\n" + engine.ask_context())
+    try:
+        res = llm.chat(msgs, j.get("model"), max_tokens=4000, system=system)
+    except Exception as e:  # noqa
+        return jsonify({"error": str(e)}), 502
+    return jsonify(res)
 
 
 @app.post("/api/refresh")
@@ -209,63 +285,16 @@ def api_refresh():
 def api_override(ind_id):
     if ind_id not in BY_ID:
         return jsonify({"error": "未知指标"}), 404
-    text = request.get_data(as_text=True) or ""
     if request.args.get("clear"):
         datasource.clear_override(ind_id)
         n = 0
     else:
         try:
-            n = datasource.save_override(ind_id, text)
+            n = datasource.save_override(ind_id, request.get_data(as_text=True) or "")
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
     engine.load_all(force_live=False, background=True)
     return jsonify({"ok": True, "rows": n})
-
-
-@app.get("/api/table")
-def api_table():
-    nr = not_ready()
-    if nr:
-        return nr
-    return jsonify(engine.data_table(int(request.args.get("months", 24))))
-
-
-@app.get("/api/data.csv")
-def api_data_csv():
-    nr = not_ready()
-    if nr:
-        return nr
-    return Response(datasource.export_csv(engine._state["series"]), mimetype="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=macro_data.csv"})
-
-
-@app.post("/api/update_and_predict")
-@need_auth
-def api_update_and_predict():
-    j = request.get_json(force=True) or {}
-    job = engine.update_and_predict(j.get("mode", "title"), j.get("model"))
-    return jsonify({**job, "status_after": engine.status()})
-
-
-@app.post("/api/ask")
-@need_auth
-def api_ask():
-    nr = not_ready()
-    if nr:
-        return nr
-    j = request.get_json(force=True) or {}
-    msgs = j.get("messages") or []
-    if not msgs or not isinstance(msgs, list):
-        return jsonify({"error": "缺少 messages"}), 400
-    msgs = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))[:8000]} for m in msgs[-12:]]
-    system = ("你是“观数”宏观研究助手，服务于投资经理。请基于下方系统提供的最新宏观数据与模型预测作答，"
-              "引用具体数值与月份；对未来判断给出方向、幅度与依据；数据未覆盖的内容明确说明。用中文、简洁、结论先行。\n\n"
-              + engine.ask_context())
-    try:
-        res = llm.chat([{"role": "system", "content": system}] + msgs, j.get("model"))
-    except Exception as e:  # noqa
-        return jsonify({"error": str(e)}), 502
-    return jsonify(res)
 
 
 @app.post("/api/auth/check")
@@ -275,7 +304,6 @@ def api_auth_check():
 
 
 boot()
-
 
 if __name__ == "__main__":
     import os
