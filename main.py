@@ -15,8 +15,10 @@ import datasource
 import engine
 import live
 import llm
+import markets
 import reports
 import store
+import theory
 from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES
 
 STATIC = config.ROOT
@@ -190,6 +192,57 @@ def api_live_reports():
 def _prev_month(m):
     y, mm = int(m[:4]), int(m[5:7])
     return f"{y - (mm == 1)}-{12 if mm == 1 else mm - 1:02d}"
+
+
+@app.get("/api/transmission/<ind_id>")
+def api_transmission(ind_id):
+    nr = not_ready()
+    if nr:
+        return nr
+    if ind_id not in BY_ID:
+        return jsonify({"error": "未知指标"}), 404
+    return jsonify(engine.transmission(ind_id, request.args.get("start", "2010-01")))
+
+
+@app.get("/api/markets/status")
+def api_markets_status():
+    return jsonify(markets.status())
+
+
+@app.get("/api/markets/series/<key>")
+def api_markets_series(key):
+    if key not in markets.BY_KEY:
+        return jsonify({"error": "未知市场"}), 404
+    ser = markets.series(key)
+    return jsonify({"key": key, "name": markets.BY_KEY[key][1], "type": markets.BY_KEY[key][3], "months": list(ser), "values": list(ser.values()), "responses": markets.responses(key)})
+
+
+@app.get("/api/board")
+def api_board():
+    """实时看板：按国家 / 分组整理的宏观数据总表（最新值、变动、待发布、预测）。"""
+    nr = not_ready()
+    if nr:
+        return nr
+    out = {}
+    for c in ("CN", "US"):
+        rows = engine.overview(c)
+        groups = {}
+        for r in rows:
+            if r.get("missing"):
+                continue
+            b = r.get("basis") or {}
+            con = b.get("conclusion") or {}
+            hist = r.get("history") or []
+            groups.setdefault(r["group"], []).append({
+                "id": r["id"], "name": r["name"], "short": r["short"], "unit": r["unit"], "freq": r["freq"], "role": r["role"],
+                "last_month": r["last_month"], "last_value": r["last_value"], "prev_value": r.get("prev_value"),
+                "spark": [h[1] for h in hist[-12:]], "pending_month": r.get("pending_month"), "release_est": r.get("release_est"),
+                "pred": con.get("value"), "method": con.get("used"), "band": con.get("band"), "ai": bool(r.get("ai")),
+                "persist_corr": r.get("persist_corr"), "ar_corr": r.get("ar_corr"), "mf_corr": r.get("mf_corr"),
+                "sign": theory.for_indicator(BY_ID[r["id"]])["sign"],
+            })
+        out[c] = [{"group": g, "items": groups[g]} for g in GROUPS_ORDER if g in groups]
+    return jsonify({"board": out, "status": engine.status(), "markets": markets.status()})
 
 @app.post("/api/nowcast")
 @need_auth

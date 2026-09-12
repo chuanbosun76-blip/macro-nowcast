@@ -126,6 +126,7 @@ PROMPT = """【任务】预测 {year}年{month}月 的「{name}」（单位：{u
 【统计模型参考】
 - 沿用上期：{persist}
 - SARIMAX（{order}，扩展窗口回测相关性 {ar_corr}）：{ar}
+- 多因子岭回归（自身滞后 + 关联指标：{mf_features}）：{mf}
 {related}
 {texts}
 {custom}
@@ -140,7 +141,7 @@ PROMPT = """【任务】预测 {year}年{month}月 的「{name}」（单位：{u
   "mechanism": "传导机制与理论依据（2–4 句，说明为什么这些因素会导致该方向和幅度）",
   "evidence": ["引用的研报标题或数据点 1", "..."],
   "risks": ["可能导致预测偏差的风险 1", "风险 2"],
-  "vs_models": "与沿用上期/SARIMAX 的差异及原因（1–2 句）"
+  "vs_models": "与沿用上期/SARIMAX/多因子回归的差异及原因（1–2 句）"
 }}"""
 
 
@@ -171,7 +172,9 @@ def build_prompt(ind, month, ctx: dict, mode: str, custom: str = "") -> str:
     ar_txt = fmt_val(ctx.get("ar"), ind["unit"]) if ctx.get("ar") is not None else "不适用"
     if mode == "title_ar" and ctx.get("ar") is not None:
         ar_txt += "（请将其作为重要参考）"
+    mf_txt = fmt_val(ctx.get("mf"), ind["unit"]) if ctx.get("mf") is not None else "不适用"
     return PROMPT.format(year=y, month=m, name=ind["name"], unit=ind["unit"] or "指数", release=f"发布规律：{ind['release']}。",
+                         mf=mf_txt, mf_features="、".join(ctx.get("mf_features") or []) or "—",
                          theory=ind.get("theory") or "", n_hist=len(ctx["history"]), history=hist,
                          persist=fmt_val(ctx.get("persist"), ind["unit"]), order=ctx.get("order") or "—",
                          ar_corr=("%.2f" % ctx["ar_corr"]) if ctx.get("ar_corr") is not None else "—", ar=ar_txt,

@@ -17,8 +17,10 @@ import numpy as np
 import config
 import datasource
 import llm
+import markets
 import reports
 import store
+import theory
 from calendar_cn import spring_series
 from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES
 from tsmodels import adf_test, expanding_backtest, lag1_corr, ljung_box, spec_from_label
@@ -29,7 +31,7 @@ AR_VERSION = "v6"
 SEED_FILE = config.ROOT / "ar_seed.json"
 _seed_cache = None
 
-_state = {"series": {}, "ar": {}, "ar_progress": {}, "ready": False, "loading": False, "error": None, "loaded_at": None,
+_state = {"series": {}, "ar": {}, "mf": {}, "ar_progress": {}, "ready": False, "loading": False, "error": None, "loaded_at": None,
           "last_check": None, "version": uuid.uuid4().hex[:12], "pending": {}}
 _lock = threading.RLock()
 JOBS: dict[str, dict] = {}
@@ -124,6 +126,17 @@ def load_all(force_live=False, background=True, network=True):
                     compute_ar(ind["id"])
                 else:
                     _state["ar_progress"][ind["id"]] = 1.0
+            for ind in INDICATORS:
+                if is_modeled(ind) and series[ind["id"]]["months"]:
+                    try:
+                        compute_mf(ind["id"])
+                    except Exception:  # noqa
+                        traceback.print_exc()
+            if network and not config.OFFLINE:
+                try:
+                    markets.load(force=True)
+                except Exception:  # noqa
+                    traceback.print_exc()
             new_pending = {i["id"]: pending_month(i["id"]) for i in INDICATORS if series[i["id"]]["months"]}
             with _lock:
                 _state["pending"] = new_pending
@@ -249,6 +262,206 @@ def status():
             "runs": store.count_runs(), "n_indicators": {"CN": sum(1 for i in active_indicators() if i["country"] == "CN"),
                                                           "US": sum(1 for i in active_indicators() if i["country"] == "US")},
             "hidden_indicators": [i["id"] for i in INDICATORS if unreachable(i)]}
+
+
+# ------------------------------------------------------------------ 多因子岭回归（第四种方法）
+LEAD = {"pmi_mfg", "pmi_nonmfg", "us_ism_mfg", "us_ism_nonmfg", "us_umcsent", "us_conf_board", "us_fedfunds"}
+MF_LAMBDA = 1.0
+MF_MAX_FEATURES = 8
+
+
+def _shift(m, k):
+    t = int(m[:4]) * 12 + int(m[5:7]) - 1 + k
+    return f"{t // 12}-{t % 12 + 1:02d}"
+
+
+def _nearest_before(d, m, back=2):
+    """取 m 当月值，缺失则向前找最多 back 个月（1–2 月合并等）。"""
+    for k in range(0, back + 1):
+        v = d.get(_shift(m, -k))
+        if v is not None:
+            return v
+    return None
+
+
+def compute_mf(ind_id: str):
+    """多因子岭回归：y_t = α + Σβ_i·z_i,t（标准化特征：自身滞后 + 同国关联指标滞后一期/领先指标当期），扩展窗口逐月重估。"""
+    ind = BY_ID[ind_id]
+    s = _state["series"][ind_id]
+    months, values = s["months"], s["values"]
+    if len(values) < 48:
+        _state["mf"][ind_id] = {"error": "样本不足"}
+        return
+    ym = dict(zip(months, values))
+    pm = pending_month(ind_id)
+    cands = []
+    for o in INDICATORS:
+        if o["country"] != ind["country"] or o["id"] == ind_id or o["freq"] != "M":
+            continue
+        so = _state["series"].get(o["id"])
+        if not so or len(so["months"]) < 48:
+            continue
+        cands.append((o["id"], o["short"], dict(zip(so["months"], so["values"]))))
+
+    def row_for(i, t):
+        r = {"y_lag1": values[i - 1] if i >= 1 else None, "y_lag2": values[i - 2] if i >= 2 else None, "y_lag12": ym.get(_shift(t, -12))}
+        for key, short, d in cands:
+            r[key] = _nearest_before(d, t if key in LEAD else _shift(t, -1))
+        return r
+
+    rows = [row_for(i, t) for i, t in enumerate(months)]
+    now_row = {"y_lag1": values[-1], "y_lag2": values[-2], "y_lag12": ym.get(_shift(pm, -12))}
+    for key, short, d in cands:
+        now_row[key] = _nearest_before(d, pm if key in LEAD else _shift(pm, -1), back=1)
+    names = list(rows[-1].keys())
+    labels = {"y_lag1": "自身滞后1期", "y_lag2": "自身滞后2期", "y_lag12": "自身滞后12期", **{k: sh + ("（当期）" if k in LEAD else "（滞后1期）") for k, sh, _ in cands}}
+    start_idx = next((i for i, m in enumerate(months) if m >= config.BACKTEST_START), len(months))
+    screen_n = max(36, min(start_idx, 72))
+    # 特征筛选：只用回测起点之前的样本，按 |corr| 取前 N（避免用未来信息选特征）
+    y0 = np.array(values[:screen_n], dtype=float)
+    scores = []
+    for nm in names:
+        col = np.array([np.nan if rows[i].get(nm) is None else rows[i][nm] for i in range(screen_n)], dtype=float)
+        ok = ~np.isnan(col) & ~np.isnan(y0)
+        if ok.sum() < 24 or col[ok].std() < 1e-9:
+            continue
+        c = float(np.corrcoef(col[ok], y0[ok])[0, 1])
+        if math.isfinite(c):
+            scores.append((abs(c), nm))
+    scores.sort(reverse=True)
+    sel = [nm for _, nm in scores[:MF_MAX_FEATURES]]
+    if "y_lag1" not in sel:
+        sel = ["y_lag1"] + sel[:MF_MAX_FEATURES - 1]
+    X = np.array([[np.nan if rows[i].get(nm) is None else rows[i][nm] for nm in sel] for i in range(len(months))], dtype=float)
+    Y = np.array(values, dtype=float)
+
+    def fit(upto):
+        ok = ~np.isnan(X[:upto]).any(axis=1) & ~np.isnan(Y[:upto])
+        Xa, Ya = X[:upto][ok], Y[:upto][ok]
+        if len(Ya) < 30:
+            return None
+        mu, sd = Xa.mean(axis=0), Xa.std(axis=0)
+        sd[sd < 1e-9] = 1.0
+        Z = (Xa - mu) / sd
+        ymu = Ya.mean()
+        A = Z.T @ Z + MF_LAMBDA * np.eye(Z.shape[1])
+        beta = np.linalg.solve(A, Z.T @ (Ya - ymu))
+        return mu, sd, ymu, beta
+
+    def predict(model, xrow):
+        mu, sd, ymu, beta = model
+        z = (np.array(xrow, dtype=float) - mu) / sd
+        z = np.where(np.isnan(z), 0.0, z)
+        return float(ymu + z @ beta)
+
+    preds = {}
+    model = None
+    for i in range(start_idx, len(months)):
+        if model is None or months[i].endswith("-01") or (i - start_idx) % 3 == 0:
+            model = fit(i) or model
+        if model is None:
+            continue
+        preds[months[i]] = _clean(predict(model, X[i]))
+    final = fit(len(months))
+    nowcast = None
+    if final:
+        nowcast = _clean(predict(final, [np.nan if now_row.get(nm) is None else now_row[nm] for nm in sel]))
+    coef = {labels.get(nm, nm): _clean(float(b)) for nm, b in zip(sel, final[3])} if final else {}
+    _state["mf"][ind_id] = {"preds": preds, "nowcast": nowcast, "nowcast_month": pm, "features": [labels.get(nm, nm) for nm in sel],
+                            "coef": coef, "n_train": int((~np.isnan(X).any(axis=1)).sum()), "lambda": MF_LAMBDA,
+                            "screen_window": f"{months[0]}–{months[min(screen_n, len(months)) - 1]}", "computed_at": time.strftime("%Y-%m-%d %H:%M")}
+
+
+def mf_preds(ind_id):
+    return (_state["mf"].get(ind_id) or {}).get("preds") or {}
+
+
+# ------------------------------------------------------------------ 宏观 → 市场传导（事件回归）
+def _ols(x, y):
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 12 or x.std() < 1e-12 or y.std() < 1e-12:
+        return None
+    xb, yb = x.mean(), y.mean()
+    sxx = ((x - xb) ** 2).sum()
+    beta = ((x - xb) * (y - yb)).sum() / sxx
+    alpha = yb - beta * xb
+    resid = y - alpha - beta * x
+    se = math.sqrt((resid ** 2).sum() / (n - 2) / sxx) if n > 2 else float("nan")
+    corr = float(np.corrcoef(x, y)[0, 1])
+    return {"n": n, "beta": float(beta), "alpha": float(alpha), "se": _clean(se), "t": _clean(beta / se) if se and se > 0 else None,
+            "r2": _clean(corr ** 2), "corr": _clean(corr), "beta_std": _clean(beta * x.std()),
+            "pos_mean": _clean(float(y[x > 0].mean())) if (x > 0).any() else None, "neg_mean": _clean(float(y[x < 0].mean())) if (x < 0).any() else None,
+            "hit": _clean(float(np.mean(np.sign(x[x != 0]) == np.sign(y[x != 0])))) if (x != 0).any() else None}
+
+
+def transmission(ind_id, start="2010-01"):
+    ind = BY_ID[ind_id]
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"]:
+        return {"error": "无数据"}
+    actual = _actual(ind_id)
+    arp = (_state["ar"].get(ind_id) or {}).get("preds") or {}
+    pp = persist_preds(ind_id)
+    rel = 0 if "当月" in ind["release"] else (2 if "隔月" in ind["release"] else 1)
+    sur, ref_used = {}, {}
+    for m in s["months"]:
+        if m < start:
+            continue
+        ref = arp.get(m)
+        src = "ar"
+        if ref is None:
+            ref, src = pp.get(m), "persist"
+        if ref is None or actual.get(m) is None or not math.isfinite(ref):
+            continue
+        sur[m] = actual[m] - ref
+        ref_used[m] = src
+    th = theory.for_indicator(ind)
+    sd = float(np.std(list(sur.values()))) if len(sur) >= 12 else None
+    out = {"indicator": ind_id, "name": ind["name"], "unit": ind["unit"], "release_lag": rel, "n_surprise": len(sur), "surprise_sd": _clean(sd),
+           "sample": f"{min(sur)}–{max(sur)}" if sur else None, "ref_mix": {"ar": sum(1 for v in ref_used.values() if v == "ar"), "persist": sum(1 for v in ref_used.values() if v == "persist")},
+           "theory": th, "markets": []}
+    if not sur:
+        return out
+    b = basis(ind_id)
+    con = (b or {}).get("conclusion") or {}
+    pred = con.get("value")
+    ar_now = ((b or {}).get("ar") or {}).get("value")
+    ref_now = ar_now if ar_now is not None else (b or {}).get("last_value")
+    implied = (pred - ref_now) if (pred is not None and ref_now is not None) else None
+    z = implied / sd if (implied is not None and sd) else None
+    # 各方法各自的隐含惊喜（便于对比：AI 与统计模型分歧越大，隐含冲击越大）
+    by_method = {}
+    for key, val in (("persist", ((b or {}).get("persist") or {}).get("value")), ("mf", ((b or {}).get("mf") or {}).get("value")),
+                     ("ai", ((b or {}).get("ai") or {}).get("value"))):
+        if val is not None and ref_now is not None and sd:
+            by_method[key] = {"pred": _clean(val), "surprise": _clean(val - ref_now), "z": _clean((val - ref_now) / sd)}
+    out["implied"] = {"pred": pred, "ref": ref_now, "ref_kind": "SARIMAX 事前预测" if ar_now is not None else "上期值", "surprise": _clean(implied), "z": _clean(z),
+                      "method": con.get("used"), "by_method": by_method, "target_label": (b or {}).get("target_label")}
+    for key, name, mkt, typ, secid, tx in markets.META:
+        resp = markets.responses(key)
+        pairs, pairs2, ms = [], [], []
+        for m in sorted(sur):
+            m0, m1 = _shift(m, rel), _shift(m, rel + 1)
+            if m0 in resp:
+                pairs.append((sur[m], resp[m0]))
+                ms.append(m)
+                pairs2.append((sur[m], resp[m0] + resp.get(m1, 0.0)))
+        if len(pairs) < 24:
+            continue
+        r0 = _ols([p[0] for p in pairs], [p[1] for p in pairs])
+        r2m = _ols([p[0] for p in pairs2], [p[1] for p in pairs2])
+        rec = _ols([p[0] for p in pairs[-60:]], [p[1] for p in pairs[-60:]])
+        if not r0:
+            continue
+        sign_theory = th["sign"].get(key, 0)
+        out["markets"].append({"key": key, "name": name, "market": mkt, "type": typ, "unit": "%" if typ == "equity" else "bp",
+                               "release_month": r0, "two_month": r2m, "recent5y": rec, "sign_theory": sign_theory,
+                               "consistent": (None if sign_theory == 0 or r0.get("beta_std") is None else (sign_theory > 0) == (r0["beta_std"] > 0)),
+                               "implied_move": _clean(r0["beta_std"] * z) if (z is not None and r0.get("beta_std") is not None) else None,
+                               "implied_by_method": {k: _clean(r0["beta_std"] * v["z"]) for k, v in by_method.items() if v.get("z") is not None and r0.get("beta_std") is not None},
+                               "months": ms[-3:]})
+    return out
 
 
 # ------------------------------------------------------------------ 发布日历 / 预测对象 / 预测依据
@@ -397,17 +610,30 @@ def basis(ind_id, sm=None):
                               + f"每年 1 月按 AIC 重选阶数，扩展窗口逐月只用截至上月的数据重估（无未来信息）。"
                               + (f"{config.BACKTEST_START} 以来回测相关系数 {_fc(am.get('corr'))}，RMSE {_fc(am.get('rmse'))}，方向命中率 {_pct(am.get('hit'))}；" if am else "")
                               + (f"近 {len(res)} 期残差 σ={_fc(sigma)}，80% 置信区间 [{_fmt(band[0], unit)}, {_fmt(band[1], unit)}]。" if band else ""))}
+    out["mf"] = None
+    mf = _state["mf"].get(ind_id) or {}
+    if mf.get("preds"):
+        mm = (sm or {}).get("mf") or {}
+        v = mf.get("nowcast") if mf.get("nowcast_month") == pm else None
+        top = sorted((mf.get("coef") or {}).items(), key=lambda kv: -abs(kv[1] or 0))[:5]
+        out["mf"] = {"value": v, "features": mf.get("features"), "coef": mf.get("coef"), "corr": mm.get("corr"), "rmse": mm.get("rmse"), "hit": mm.get("hit"), "n_train": mf.get("n_train"),
+                     "text": (f"多因子岭回归（λ={mf.get('lambda')}，特征标准化后估计）：特征 {len(mf.get('features') or [])} 个——" + "、".join(mf.get("features") or [])
+                              + f"；特征按回测起点前样本（{mf.get('screen_window')}）的相关性筛选，避免用未来信息选变量；扩展窗口逐季重估。"
+                              + f"最新系数（标准化，绝对值前 5）：" + "，".join(f"{k} {v:+.2f}" for k, v in top) + "。"
+                              + (f"{config.BACKTEST_START} 以来回测相关系数 {_fc(mm.get('corr'))}，RMSE {_fc(mm.get('rmse'))}，方向命中率 {_pct(mm.get('hit'))}。" if mm else ""))}
     live = store.latest_live(ind_id, pm) if modeled else None
     out["ai"] = live
     rec = (sm or {}).get("recommend") if sm else "ref"
     why = (sm or {}).get("why") if sm else "参考指标：仅展示最新数据与走势，不做预测"
-    cand = {"persist": out["persist"]["value"], "ar": (out["ar"] or {}).get("value"), "ai": (live or {}).get("value")}
+    cand = {"persist": out["persist"]["value"], "ar": (out["ar"] or {}).get("value"), "mf": (out["mf"] or {}).get("value"), "ai": (live or {}).get("value")}
     val, used, note = cand.get(rec), rec, ""
     if rec == "ai" and val is None:
-        used = "ar" if cand["ar"] is not None else "persist"
+        used = "ar" if cand["ar"] is not None else ("mf" if cand["mf"] is not None else "persist")
         val = cand[used]
-        note = "AI 研判尚未运行，暂以 " + {"ar": "SARIMAX", "persist": "沿用上期"}[used] + " 作为占位值；点击「AI 预测」后以 AI 结果为准。"
-    names = {"persist": "沿用上期", "ar": "SARIMAX", "ai": "AI 研判", "ref": "参考"}
+        note = "AI 研判尚未运行，暂以 " + {"ar": "SARIMAX", "mf": "多因子回归", "persist": "沿用上期"}[used] + " 作为占位值；点击「AI 预测」后以 AI 结果为准。"
+    if val is None and used in ("ar", "mf"):
+        used, val = "persist", cand["persist"]
+    names = {"persist": "沿用上期", "ar": "SARIMAX", "mf": "多因子回归", "ai": "AI 研判", "ref": "参考"}
     band = (out["ar"] or {}).get("band") if used == "ar" else ([live["low"], live["high"]] if used == "ai" and live and live.get("low") is not None else None)
     out["conclusion"] = {"method": rec, "used": used, "value": val, "band": band, "why": why, "note": note,
                          "text": ("" if not modeled else f"预测对象：{label} {ind['name']}（{'预计 ' + rel + ' 公布' if rel else ind['release']}）。"
@@ -449,11 +675,16 @@ def calendar_upcoming(days=45):
 
 
 # ------------------------------------------------------------------ 汇总
-def recommend(ind, persist_corr, ar_corr, llm_m=None):
+def recommend(ind, persist_corr, ar_corr, llm_m=None, mf_corr=None):
     if not is_modeled(ind):
         return "ref", "参考指标：仅展示，不做实时预测"
     if persist_corr is not None and persist_corr >= 0.8:
+        if mf_corr is not None and mf_corr - persist_corr >= 0.05:
+            return "mf", f"多因子回归回测相关性 {mf_corr:.2f} 显著优于沿用上期 {persist_corr:.2f}"
         return "persist", f"与上期相关性 {persist_corr:.2f} ≥ 0.8，惯性极强，沿用上期即为最优"
+    best_stat = max([(ar_corr or -1, "ar"), (mf_corr or -1, "mf")])
+    if best_stat[1] == "mf" and mf_corr is not None and mf_corr >= 0.5 and mf_corr - (persist_corr if persist_corr is not None else -1) >= 0.05 and mf_corr - (ar_corr or -1) >= 0.03:
+        return "mf", f"多因子回归回测相关性 {mf_corr:.2f} 优于 SARIMAX {ar_corr if ar_corr is not None else float('nan'):.2f} 与沿用上期 {persist_corr if persist_corr is not None else float('nan'):.2f}"
     if llm_m and llm_m.get("n", 0) >= 12 and llm_m.get("corr") is not None:
         cand = [("persist", (llm_m.get("persist_same") or {}).get("corr")), ("ar", (llm_m.get("ar_same") or {}).get("corr")), ("ai", llm_m["corr"])]
         cand = [(k, v) for k, v in cand if v is not None]
@@ -480,14 +711,15 @@ def summary(ind_id, start=None, end=None, model=None):
     pp = persist_preds(ind_id)
     ar = _state["ar"].get(ind_id) or {}
     arp = ar.get("preds") or {}
-    out = {"persist": metrics(actual, pp, win), "ar": metrics(actual, arp, win) if arp else None, "llm": {}}
+    mfp = mf_preds(ind_id)
+    out = {"persist": metrics(actual, pp, win), "ar": metrics(actual, arp, win) if arp else None, "mf": metrics(actual, mfp, win) if mfp else None, "llm": {}}
     for mode in LLM_MODES:
         lp = store.latest_preds(ind_id, mode, "backtest", model)
         lp = {m: v for m, v in lp.items() if start <= m <= end}
         if lp:
             lm = sorted(lp)
             out["llm"][mode] = {**metrics(actual, lp, lm), "persist_same": metrics(actual, pp, lm), "ar_same": metrics(actual, arp, lm) if arp else None}
-    rec, why = recommend(ind, out["persist"]["corr"], (out["ar"] or {}).get("corr"), out["llm"].get("title"))
+    rec, why = recommend(ind, out["persist"]["corr"], (out["ar"] or {}).get("corr"), out["llm"].get("title"), (out["mf"] or {}).get("corr"))
     out.update(recommend=rec, why=why)
     return out
 
@@ -504,6 +736,7 @@ def overview(country=None):
                          "missing": True, "notes": (s or {}).get("notes", [])})
             continue
         ar = _state["ar"].get(ind["id"]) or {}
+        mf = _state["mf"].get(ind["id"]) or {}
         pm = pending_month(ind["id"])
         sm = summary(ind["id"]) if is_modeled(ind) else None
         live = store.latest_live(ind["id"], pm)
@@ -513,6 +746,8 @@ def overview(country=None):
             "last_month": s["months"][-1], "last_value": s["values"][-1], "prev_value": s["values"][-2] if len(s["values"]) > 1 else None,
             "history": list(zip(s["months"][-24:], s["values"][-24:])), "pending_month": pm, "persist_pred": s["values"][-1],
             "ar_pred": ar.get("nowcast") if ar.get("nowcast_month") == pm else None, "ar_order": ar.get("final_order"), "adf_p": ar.get("adf_p"),
+            "mf_pred": mf.get("nowcast") if mf.get("nowcast_month") == pm else None, "mf_corr": ((sm or {}).get("mf") or {}).get("corr") if sm else None,
+            "mf_features": mf.get("features"),
             "persist_corr": (sm or {}).get("persist", {}).get("corr") if sm else None, "ar_corr": ((sm or {}).get("ar") or {}).get("corr") if sm else None,
             "llm_corr": {k: v.get("corr") for k, v in ((sm or {}).get("llm") or {}).items()} if sm else {},
             "recommend": (sm or {}).get("recommend") if sm else "ref", "why": (sm or {}).get("why") if sm else "参考指标",
@@ -524,7 +759,9 @@ def overview(country=None):
 def series_payload(ind_id, model=None):
     s = _state["series"][ind_id]
     ar = _state["ar"].get(ind_id) or {}
+    mf = _state["mf"].get(ind_id) or {}
     out = {"months": s["months"], "values": s["values"], "persist": persist_preds(ind_id) if s["months"] else {}, "ar": ar.get("preds") or {},
+           "mf": mf.get("preds") or {}, "mf_nowcast": mf.get("nowcast"), "mf_info": {k: mf.get(k) for k in ("features", "coef", "n_train", "lambda", "screen_window")},
            "ar_orders": ar.get("orders") or {}, "llm": {}, "pending_month": pending_month(ind_id), "ar_nowcast": ar.get("nowcast"),
            "diag": {k: ar.get(k) for k in ("adf_stat", "adf_p", "lb_resid_p", "lb_raw_p", "final_order", "d")}, "notes": s.get("notes", [])}
     for mode in LLM_MODES:
@@ -548,7 +785,8 @@ def backtest_table(start=None, end=None, model=None, country=None):
         if sm is None:
             continue
         rows.append({"id": ind["id"], "name": ind["name"], "country": ind["country"], "group": ind["group"], "role": ind["role"], "spring": ind["spring"],
-                     "persist": sm["persist"], "ar": sm["ar"], "llm": sm["llm"], "recommend": sm["recommend"], "why": sm["why"],
+                     "persist": sm["persist"], "ar": sm["ar"], "mf": sm.get("mf"), "llm": sm["llm"], "recommend": sm["recommend"], "why": sm["why"],
+                     "mf_features": (_state["mf"].get(ind["id"]) or {}).get("features"),
                      "order": ar.get("final_order"), "adf_p": ar.get("adf_p"), "paper": ind.get("paper")})
     return rows
 
@@ -602,7 +840,11 @@ def build_ctx(ind_id, month, mode, cutoff=None):
     if ar_val is None and ar.get("nowcast_month") == month:
         ar_val = ar.get("nowcast")
     sm = summary(ind_id) if is_modeled(ind) else None
-    ctx = {"history": hist, "persist": hist[-1][1] if hist else None, "ar": ar_val, "order": (ar.get("orders") or {}).get(month) or ar.get("final_order"),
+    mf = _state["mf"].get(ind_id) or {}
+    mf_val = (mf.get("preds") or {}).get(month)
+    if mf_val is None and mf.get("nowcast_month") == month:
+        mf_val = mf.get("nowcast")
+    ctx = {"history": hist, "persist": hist[-1][1] if hist else None, "ar": ar_val, "mf": mf_val, "mf_features": mf.get("features"), "order": (ar.get("orders") or {}).get(month) or ar.get("final_order"),
            "ar_corr": ((sm or {}).get("ar") or {}).get("corr") if sm else None, "related": related_for(ind) if month >= (s["months"][-1] if s["months"] else "") else []}
     info = {"n_titles": 0, "n_chunks": 0, "titles": []}
     if mode != "data":

@@ -3,8 +3,9 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const S = { meta: null, country: "CN", view: "overview", status: null, ov: {}, seriesCache: {}, chat: [], settings: null };
-const VIEW_TITLE = { overview: "总览", live: "实时看板", predict: "预测中心", data: "数据库", reports: "研报", backtest: "回测", archive: "预测档案", ask: "问 AI", settings: "设置" };
-const REC_NAME = { persist: "沿用上期", ar: "SARIMAX", ai: "AI 研判", ref: "参考" };
+const VIEW_TITLE = { overview: "总览", live: "实时看板", guide: "使用教程", predict: "预测中心", data: "数据库", reports: "研报", backtest: "回测", archive: "预测档案", ask: "问 AI", settings: "设置" };
+const REC_NAME = { persist: "沿用上期", ar: "SARIMAX", mf: "多因子回归", ai: "AI 研判", ref: "参考" };
+const MKT_UNIT = { equity: "%", yield: "bp" };
 const MODE_SHORT = { title: "AI·标题", chunk: "AI·正文", title_ar: "AI·标题+AR", data: "AI·纯数据" };
 const MODES_ORDER = ["title", "chunk", "title_ar", "data"];
 const COUNTRY_NAME = { CN: "中国", US: "美国" };
@@ -160,6 +161,7 @@ function cardHTML(r) {
     <div class="preds">
       ${pred("persist", "沿用上期", r.persist_pred, `回测相关 ${fmtC(r.persist_corr)}`)}
       ${pred("ar", "SARIMAX", r.ar_pred, `${esc(r.ar_order || "")} · ${fmtC(r.ar_corr)}`)}
+      ${pred("mf", "多因子", r.mf_pred, `${(r.mf_features || []).length} 因子 · ${fmtC(r.mf_corr)}`)}
       ${pred("ai", "AI 研判", ai ? ai.value : null, ai ? `${ai.low != null ? fmtV(ai.low, r.unit) + "~" + fmtV(ai.high, r.unit) : ""}<span class="conf ${esc(ai.confidence || "")}">${esc(ai.confidence || "")}</span>` : "待运行")}
     </div>
     ${ai && ai.reason ? `<div class="ai-sum"><b>AI：</b>${esc(ai.reason)}</div>` : `<div class="why">${esc(r.why || "")}</div>`}
@@ -201,6 +203,7 @@ async function showDetail(id) {
   const series = [{ name: "真实值", color: "#14202e", data: act, width: 2.2 }];
   if (Object.keys(ser.persist).length) series.push({ name: "沿用上期", color: "#9aa3ad", data: ser.persist, dash: "4 3" });
   if (Object.keys(ser.ar).length) series.push({ name: "SARIMAX", color: "#1d6b73", data: Object.assign({}, ser.ar, ser.ar_nowcast != null ? { [ser.pending_month]: ser.ar_nowcast } : {}) });
+  if (ser.mf && Object.keys(ser.mf).length) series.push({ name: "多因子回归", color: "#5a4a9c", data: Object.assign({}, ser.mf, ser.mf_nowcast != null ? { [ser.pending_month]: ser.mf_nowcast } : {}), dash: "6 3" });
   if (ser.llm.title) series.push({ name: "AI 回测", color: "#a8832f", data: ser.llm.title, dots: true });
   const live = (ser.live || [])[0];
   if (live) series.push({ name: "AI 当期", color: "#a8322a", data: { [ser.pending_month]: live.value }, dots: true, band: live.low != null ? { [ser.pending_month]: [live.low, live.high] } : null });
@@ -220,6 +223,26 @@ async function showDetail(id) {
     (runs.length > 1 ? `<h3 style="margin-top:14px">历史记录</h3><div class="tbl-wrap"><table class="arc"><tr><th>时间</th><th>目标月</th><th>预测</th><th>真实</th><th>模型</th><th>结论</th></tr>` +
       runs.map(x => `<tr><td>${esc((x.created_at || "").slice(0, 16))}</td><td>${x.target_month}</td><td><b>${fmtV(x.value, m.unit)}</b></td><td>${fmtV(act[x.target_month], m.unit)}</td><td>${esc(x.model)}</td><td class="r">${esc((x.reason || "").slice(0, 80))} <a href="#" data-run-id="${x.id}">详情</a></td></tr>`).join("") + `</table></div>` : "");
   bindRunLinks($("#dAI")); $$("[data-run]", $("#dAI")).forEach(b => b.onclick = () => runOne(b.dataset.run, b, true, ($("#dMonth") || {}).value || null));
+  $("#dAI").insertAdjacentHTML("beforeend", `<h3 style="margin-top:18px">传导分析 · 对股市 / 债市的影响</h3><div id="dTrans" class="skel">计算中…</div>`);
+  try { const tr = await api(`/api/transmission/${id}`); $("#dTrans").className = ""; $("#dTrans").innerHTML = transmissionHTML(tr, m); } catch (e) { $("#dTrans").innerHTML = `<div class="hint">${esc(e.message)}</div>`; }
+}
+function transmissionHTML(tr, m) {
+  if (!tr || tr.error) return `<div class="hint">${esc((tr || {}).error || "无")}</div>`;
+  const th = tr.theory || {}, sign = th.sign || {}, imp = tr.implied || {};
+  const sgn = v => v > 0 ? "▲ 利多/上行" : v < 0 ? "▼ 利空/下行" : "○ 视周期";
+  const fm = (v, u, plus) => v == null ? "—" : `${plus && v > 0 ? "+" : ""}${u === "bp" ? v.toFixed(1) : v.toFixed(2)}${u}`;
+  const rows = (tr.markets || []).map(k => { const r = k.release_month || {}, r2 = k.two_month || {}, rc = k.recent5y || {}; const sig = r.t != null && Math.abs(r.t) >= 1.96;
+    return `<tr class="${sig ? "sig" : ""}"><td>${esc(k.name)}<small>${k.market}</small></td><td class="${sign[k.key] > 0 ? "up" : sign[k.key] < 0 ? "down" : ""}">${sgn(sign[k.key])}</td>
+      <td><b>${fm(r.beta_std, k.unit, true)}</b></td><td>${r.t != null ? r.t.toFixed(2) : "—"}${sig ? " *" : ""}</td><td>${r.r2 != null ? (r.r2 * 100).toFixed(1) + "%" : "—"}</td><td>${r.hit != null ? (r.hit * 100).toFixed(0) + "%" : "—"}</td>
+      <td>${fm(r.pos_mean, k.unit, true)} / ${fm(r.neg_mean, k.unit, true)}</td><td>${fm(r2.beta_std, k.unit, true)}</td><td>${fm(rc.beta_std, k.unit, true)}</td>
+      <td>${k.consistent == null ? "—" : k.consistent ? "✓ 一致" : "✗ 相反"}</td><td><b>${k.implied_move != null ? fm(k.implied_move, k.unit, true) : "—"}</b></td></tr>`; }).join("");
+  return `<div class="trans">
+    <div class="basis-row con"><span class="k">传导逻辑</span><div>${esc(th.logic || "")}${th.note ? `<br><b>该指标：</b>${esc(th.note)}` : ""}</div></div>
+    <div class="basis-row"><span class="k">本次含义</span><div>${imp.pred != null ? `推荐预测（${REC_NAME[imp.method] || ""}）<b>${fmtV(imp.pred, m.unit)}</b> ${esc(m.unit)} 相对预期基准 ${esc(imp.ref_kind || "")} ${fmtV(imp.ref, m.unit)} 的“隐含惊喜”为 <b>${imp.surprise != null ? (imp.surprise > 0 ? "+" : "") + fmtV(imp.surprise, m.unit) : "—"}</b>（${imp.z != null ? imp.z.toFixed(2) + "σ" : "—"}）。表格最右列 = 若该预测兑现，按历史回归关系隐含的当月市场反应。
+      ${Object.keys(imp.by_method || {}).length ? `<div class="imp-row">${Object.entries(imp.by_method).map(([k, v]) => `<span class="imp ${k}">${REC_NAME[k]} ${fmtV(v.pred, m.unit)} → ${v.z > 0 ? "+" : ""}${v.z.toFixed(2)}σ</span>`).join("")}</div>` : ""}
+      ${imp.surprise != null && Math.abs(imp.surprise) < 1e-9 ? `<span class="hint">当前推荐值恰等于统计基准，故隐含惊喜为 0——这意味着“若数据如模型所料，市场理应无额外反应”。运行 AI 研判后若给出不同数值，此处会显示该分歧隐含的市场影响。</span>` : ""}` : "暂无预测"}</div></div>
+    <div class="tbl-wrap"><table class="bt trans-t"><tr><th>市场</th><th>理论方向<small>正向惊喜</small></th><th>β<small>每 1σ 惊喜</small></th><th>t 值</th><th>R²</th><th>方向一致率</th><th>正惊喜 / 负惊喜<small>均值反应</small></th><th>两个月累计 β</th><th>近 5 年 β</th><th>理论 vs 实证</th><th>本次隐含</th></tr>${rows || `<tr><td colspan="11" class="hint">样本不足（需 ≥24 个月重叠）</td></tr>`}</table></div>
+    <p class="hint">方法：惊喜 s<sub>t</sub> = 实际值 − 事前预测（SARIMAX 扩展窗口，样本 ${esc(tr.sample || "")}，其中 SARIMAX ${(tr.ref_mix || {}).ar || 0} 期 / 沿用上期 ${(tr.ref_mix || {}).persist || 0} 期）；市场反应 = 数据公布月（数据月 +${tr.release_lag}）的股指对数收益率（%）或国债收益率变动（bp）；OLS：r = α + β·s + ε，β 已按惊喜标准差 σ=${tr.surprise_sd != null ? fmtV(tr.surprise_sd, m.unit) : "—"} 折算；t 值绝对值 ≥1.96（*）视为 5% 显著。R² 普遍很低是正常的——宏观数据只解释月度收益的一小部分，请把此表理解为“方向与相对强弱”而非交易信号。</p></div>`;
 }
 function bindRunLinks(root) { $$("[data-run-id]", root).forEach(a => a.onclick = ev => { ev.preventDefault(); showRun(a.dataset.runId); }); }
 async function runOne(id, btn, inDrawer, month) {
@@ -362,11 +385,11 @@ async function renderBacktest() {
   $("#btTable").innerHTML = `<tr><td class="skel">计算中…</td></tr>`;
   let rows; try { rows = (await api("/api/backtest?" + q)).rows; } catch (e) { $("#btTable").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; return; }
   const modes = MODES_ORDER;
-  let h = `<tr><th>指标</th><th>沿用上期</th><th>SARIMAX</th>${modes.map(m => `<th>${MODE_SHORT[m]}</th>`).join("")}<th>阶数</th><th>推荐</th></tr>`;
+  let h = `<tr><th>指标</th><th>沿用上期</th><th>SARIMAX</th><th>多因子回归</th>${modes.map(m => `<th>${MODE_SHORT[m]}</th>`).join("")}<th>阶数</th><th>推荐</th></tr>`;
   rows.forEach(r => {
-    const vals = [r.persist && r.persist.corr, r.ar && r.ar.corr, ...modes.map(m => r.llm[m] && r.llm[m].corr)]; const mx = Math.max(...vals.filter(v => v != null));
-    const cell = (v, n) => `<td class="${v != null && v === mx ? "hi" : v == null ? "lo" : ""}">${fmtC(v)}${n ? `<span class="pp">n=${n}</span>` : ""}</td>`;
-    h += `<tr class="${r.role === "persist" ? "persist-row" : ""}"><td>${esc(r.name)}${r.spring ? ' <span class="tag llm">春节</span>' : ""}</td>${cell(r.persist.corr)}${cell(r.ar && r.ar.corr)}${modes.map(m => cell(r.llm[m] && r.llm[m].corr, r.llm[m] && r.llm[m].n)).join("")}<td>${esc(r.order || "")}</td><td title="${esc(r.why)}"><span class="tag ${r.recommend}">${REC_NAME[r.recommend]}</span></td></tr>`;
+    const vals = [r.persist && r.persist.corr, r.ar && r.ar.corr, r.mf && r.mf.corr, ...modes.map(m => r.llm[m] && r.llm[m].corr)]; const mx = Math.max(...vals.filter(v => v != null));
+    const cell = (v, n, title) => `<td class="${v != null && v === mx ? "hi" : v == null ? "lo" : ""}" title="${esc(title || "")}">${fmtC(v)}${n ? `<span class="pp">n=${n}</span>` : ""}</td>`;
+    h += `<tr class="${r.role === "persist" ? "persist-row" : ""}"><td>${esc(r.name)}${r.spring ? ' <span class="tag llm">春节</span>' : ""}</td>${cell(r.persist.corr)}${cell(r.ar && r.ar.corr)}${cell(r.mf && r.mf.corr, null, (r.mf_features || []).join("、"))}${modes.map(m => cell(r.llm[m] && r.llm[m].corr, r.llm[m] && r.llm[m].n)).join("")}<td>${esc(r.order || "")}</td><td title="${esc(r.why)}"><span class="tag ${r.recommend}">${REC_NAME[r.recommend]}</span></td></tr>`;
   });
   $("#btTable").innerHTML = h; renderBtChart();
 }
@@ -375,6 +398,7 @@ async function renderBtChart() {
   const from = $("#btFrom").value || "2014-01", to = $("#btTo").value || "9999"; const months = ser.months.filter(x => x >= from && x <= to);
   const act = Object.fromEntries(ser.months.map((x, i) => [x, ser.values[i]])); const colors = { title: "#a8322a", chunk: "#a8832f", title_ar: "#5a4a9c", data: "#2f7d4f" };
   const series = [{ name: "真实值", color: "#14202e", data: act, width: 2.2 }, { name: "沿用上期", color: "#9aa3ad", data: ser.persist, dash: "4 3" }, { name: "SARIMAX", color: "#1d6b73", data: ser.ar }];
+  if (ser.mf && Object.keys(ser.mf).length) series.push({ name: "多因子回归", color: "#5a4a9c", data: ser.mf, dash: "6 3" });
   Object.keys(ser.llm).forEach(k => series.push({ name: MODE_SHORT[k], color: colors[k], data: ser.llm[k], dots: true }));
   $("#btLegend").innerHTML = series.map(s => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join("");
   lineChart($("#btChart"), { months, series, unit: m.unit, clip: true, height: 340 });
@@ -450,7 +474,7 @@ function fillCountrySelects() {
 function show(v) {
   if (!VIEW_TITLE[v]) v = "overview"; S.view = v;
   $$(".view").forEach(s => s.hidden = s.id !== "v-" + v); $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.v === v)); $("#viewTitle").textContent = VIEW_TITLE[v];
-  $("#countrySeg").style.visibility = ["ask", "settings", "archive", "live"].includes(v) ? "hidden" : "visible";
+  $("#countrySeg").style.visibility = ["ask", "settings", "archive", "live", "guide"].includes(v) ? "hidden" : "visible";
   if (v !== "live") stopLive();
   if (!S.meta) return;
   if (v === "overview") loadOverview();
@@ -501,7 +525,8 @@ function basisHTML(b, r) {
     ${b.modeled ? `<div class="basis-row con"><span class="k">综合结论</span><div>${esc(c.text || "")}</div></div>` : ""}
     <div class="basis-row"><span class="k">① 沿用上期</span><div><b>${fmtV(b.persist.value, unit)}</b> — ${esc(b.persist.text)}</div></div>
     <div class="basis-row"><span class="k">② SARIMAX</span><div>${b.ar ? `<b>${fmtV(b.ar.value, unit)}</b>${b.ar.band ? ` <span class="muted">[${fmtV(b.ar.band[0], unit)}, ${fmtV(b.ar.band[1], unit)}]</span>` : ""} — ${esc(b.ar.text)}${recentTable(b.ar.recent, unit)}` : "非月度指标或样本不足，未建模。"}</div></div>
-    <div class="basis-row"><span class="k">③ AI 研判</span><div>${b.ai ? `<b>${fmtV(b.ai.value, unit)}</b>${b.ai.low != null ? ` <span class="muted">[${fmtV(b.ai.low, unit)}, ${fmtV(b.ai.high, unit)}]</span>` : ""} — ${esc(b.ai.reason || "")}${analysisHTML(b.ai, unit)}` : `尚未运行。点击「AI 预测」后：召回 ${esc(b.target_label)} 截止前的研报（直达链接）+ 最新数据 + 上述统计模型参考，输出数值、区间、驱动因素、传导机制、证据与风险。`}</div></div>
+    <div class="basis-row"><span class="k">③ 多因子回归</span><div>${b.mf ? `<b>${fmtV(b.mf.value, unit)}</b> — ${esc(b.mf.text)}` : "样本不足，未建模。"}</div></div>
+    <div class="basis-row"><span class="k">④ AI 研判</span><div>${b.ai ? `<b>${fmtV(b.ai.value, unit)}</b>${b.ai.low != null ? ` <span class="muted">[${fmtV(b.ai.low, unit)}, ${fmtV(b.ai.high, unit)}]</span>` : ""} — ${esc(b.ai.reason || "")}${analysisHTML(b.ai, unit)}` : `尚未运行。点击「AI 预测」后：召回 ${esc(b.target_label)} 截止前的研报（直达链接）+ 最新数据 + 上述统计模型参考，输出数值、区间、驱动因素、传导机制、证据与风险。`}</div></div>
     <div class="basis-row"><span class="k">理论驱动</span><div>${esc(b.theory || "")}</div></div>
   </div>`;
 }
@@ -510,8 +535,8 @@ function basisHTML(b, r) {
 const LV = { timers: [], last: {}, trends: {}, feedSeen: new Set() };
 function stopLive() { LV.timers.forEach(clearInterval); LV.timers = []; }
 function startLive() {
-  stopLive(); tickClock(); pollQuotes(); loadPulse(); loadCalendar(); loadFeed(); loadTrends();
-  LV.timers.push(setInterval(tickClock, 1000), setInterval(pollQuotes, 5000), setInterval(loadTrends, 60000), setInterval(loadFeed, 120000), setInterval(() => { loadPulse(); loadCalendar(); }, 300000));
+  stopLive(); tickClock(); pollQuotes(); loadBoard(); loadPulse(); loadCalendar(); loadFeed(); loadTrends();
+  LV.timers.push(setInterval(tickClock, 1000), setInterval(pollQuotes, 5000), setInterval(loadTrends, 60000), setInterval(loadFeed, 120000), setInterval(() => { loadBoard(); loadPulse(); loadCalendar(); }, 300000));
 }
 function tickClock() {
   const d = new Date(), bj = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60000);
@@ -529,9 +554,13 @@ function lvSpark(pts, pre) {
 }
 async function pollQuotes() {
   let q; try { q = await api("/api/live/quotes"); } catch (e) { return; }
-  $("#lvQuoteMeta").textContent = `· ${q.n} 项 · ${q.fetched_at ? q.fetched_at.slice(11) : ""}${q.error ? " · 行情源异常，显示上次值" : ""}`;
+  $("#lvQuoteMeta").textContent = `· ${q.n} 项 · ${q.provider || ""} · ${q.fetched_at ? q.fetched_at.slice(11) : ""}${q.error ? " · 行情源异常，显示上次值" : ""}`;
+  if (!q.items.length) { $("#lvQuotes").innerHTML = `<div class="hint">${esc(q.error || "暂无行情")}</div>`; return; }
   const groups = {}; q.items.forEach(it => (groups[it.group] = groups[it.group] || []).push(it));
-  const tile = it => { const prev = LV.last[it.secid]; const flash = prev != null && prev !== it.price ? (it.price > prev ? "flash-up" : "flash-down") : ""; LV.last[it.secid] = it.price; const t = LV.trends[it.secid];
+  LV.hist = LV.hist || {};
+  const tile = it => { const prev = LV.last[it.secid]; const flash = prev != null && prev !== it.price ? (it.price > prev ? "flash-up" : "flash-down") : ""; LV.last[it.secid] = it.price;
+    const hh = (LV.hist[it.secid] = LV.hist[it.secid] || []); if (!hh.length || hh[hh.length - 1][1] !== it.price) hh.push([new Date().toTimeString().slice(0, 5), it.price]); if (hh.length > 240) hh.shift();
+    const t = LV.trends[it.secid] && LV.trends[it.secid].points && LV.trends[it.secid].points.length ? LV.trends[it.secid] : (hh.length > 2 ? { points: hh, pre_close: it.price - it.chg } : null);
     const dec = Math.abs(it.price) < 10 ? 4 : Math.abs(it.price) < 1000 ? 2 : 2;
     return `<div class="lv-q ${it.pct > 0 ? "up" : it.pct < 0 ? "down" : ""} ${flash}" data-sid="${it.secid}"><div class="lv-q-n">${esc(it.name)}<small>${esc(it.em_name || "")}</small></div><div class="lv-q-p">${it.price.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec })}</div><div class="lv-q-c">${it.pct > 0 ? "▲" : it.pct < 0 ? "▼" : ""} ${it.chg > 0 ? "+" : ""}${(+it.chg).toFixed(dec)} · ${it.pct > 0 ? "+" : ""}${(+it.pct).toFixed(2)}%</div>${t ? lvSpark(t.points, t.pre_close) : ""}</div>`; };
   $("#lvQuotes").innerHTML = Object.entries(groups).map(([g, items]) => `<div class="lv-g">${esc(g)}</div><div class="lv-qgrid">${items.map(tile).join("")}</div>`).join("");
@@ -561,4 +590,22 @@ async function loadFeed() {
   $("#lvFeed").innerHTML = f.items.map(it => { const k = it.url || it.title, fresh = !first && !LV.feedSeen.has(k); LV.feedSeen.add(k);
     return `<a class="lv-f ${fresh ? "fresh" : ""}" href="${esc(it.url || "#")}" target="_blank" rel="noopener"><div class="lv-f-m">${esc(it.date || "")} · ${esc(it.org || "")}${it.researcher ? " · " + esc(it.researcher) : ""}</div><div class="lv-f-t">${esc(it.title)}</div></a>`; }).join("") || `<div class="skel">暂无</div>`;
   $("#lvRepMeta").textContent = `· 本月 ${f.n_month || 0} 篇 · ${new Date().toTimeString().slice(0, 5)} 刷新`;
+}
+
+function lvMini(vals) {
+  const v = (vals || []).filter(x => x != null && isFinite(x)); if (v.length < 2) return "";
+  const W = 70, H = 20, lo = Math.min(...v), hi = Math.max(...v), sp = hi - lo || 1;
+  const d = v.map((x, i) => (i ? "L" : "M") + (i / (v.length - 1) * W).toFixed(1) + " " + (H - 2 - (x - lo) / sp * (H - 4)).toFixed(1)).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="lv-mini"><path d="${d}" fill="none" stroke="${v[v.length - 1] >= v[0] ? "#ff7b7b" : "#4fe3a6"}" stroke-width="1.3"/></svg>`;
+}
+const SG = v => v > 0 ? `<i class="sg up">▲</i>` : v < 0 ? `<i class="sg down">▼</i>` : `<i class="sg">○</i>`;
+async function loadBoard() {
+  let b; try { b = await api("/api/board"); } catch (e) { $("#lvBoard").innerHTML = `<div class="hint">${esc(e.message)}</div>`; return; }
+  const col = (c, groups) => `<div class="lv-bcol"><div class="lv-bc-h">${COUNTRY_NAME[c]}<small>${groups.reduce((n, g) => n + g.items.length, 0)} 项 · ${esc(((b.status || {}).data || {}).source ? (b.status.data.source[c.toLowerCase()] || "") : "")}</small></div>
+    <table class="lv-bt"><tr><th>指标</th><th>最新期</th><th>最新值</th><th>较上期</th><th>12月</th><th>待发布<small>预计公布</small></th><th>预测</th><th>方法</th><th>传导<small>${c === "CN" ? "A股/中债" : "美股/美债"}</small></th></tr>
+    ${groups.map(g => `<tr class="lv-bg"><td colspan="9">${esc(g.group)}</td></tr>` + g.items.map(it => { const d = it.prev_value != null && it.last_value != null ? it.last_value - it.prev_value : null; const eq = c === "CN" ? it.sign.hs300 : it.sign.spx, bd = c === "CN" ? it.sign.cn10y : it.sign.us10y;
+      return `<tr data-detail="${it.id}" class="${it.role === "ref" ? "ref" : ""}"><td class="nm" title="${esc(it.name)}">${esc(it.short)}<small>${esc(it.unit)}</small></td><td class="mono">${(it.last_month || "").slice(2)}</td><td class="mono b">${fmtV(it.last_value, it.unit)}</td><td class="mono ${d > 0 ? "up" : d < 0 ? "down" : ""}">${d == null ? "—" : (d > 0 ? "+" : "") + fmtV(d, it.unit)}</td><td>${lvMini(it.spark)}</td><td class="mono">${it.role === "ref" ? "—" : (it.pending_month || "").slice(2)}<small>${it.role === "ref" ? "" : (it.release_est || "").slice(5)}</small></td><td class="mono b pv">${it.role === "ref" || it.pred == null ? "—" : fmtV(it.pred, it.unit)}</td><td><span class="lv-m ${it.method || ""}">${it.role === "ref" ? "" : (REC_NAME[it.method] || "")}${it.ai ? "·AI" : ""}</span></td><td class="sgs">${SG(eq)}${SG(bd)}</td></tr>`; }).join("")).join("")}</table></div>`;
+  $("#lvBoard").innerHTML = col("CN", b.board.CN || []) + col("US", b.board.US || []);
+  const mk = b.markets || {}; $("#lvBoardMeta").textContent = `· 中国 ${((b.status || {}).n_indicators || {}).CN || 0} 项 + 美国 ${((b.status || {}).n_indicators || {}).US || 0} 项 · 市场数据库：${esc((mk.source || {}).equity || "")} / ${esc((mk.source || {}).yield || "")} · 更新 ${esc(((b.status || {}).data || {}).fetched_at || "")}`;
+  $$("#lvBoard tr[data-detail]").forEach(tr => tr.onclick = () => showDetail(tr.dataset.detail));
 }
