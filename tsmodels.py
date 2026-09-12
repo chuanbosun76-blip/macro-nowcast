@@ -261,15 +261,15 @@ def forecast_one(fit: SarimaxFit, exog_next=None) -> float:
     return float(yhat)
 
 
-def select_order(y, exog=None, d=0, seasonal=False, p_max=3, q_max=2):
-    """按 AIC 在 (p,q) 网格上选阶；季节性指标固定 P=1。统一有效样本以保证 AIC 可比。"""
+def select_order(y, exog=None, d=0, seasonal=False, p_max=3, q_max=2, season=12):
+    """按 AIC 在 (p,q) 网格上选阶；季节性指标固定 P=1（季节周期 season：月度 12 / 季度 4）。统一有效样本以保证 AIC 可比。"""
     best = None
     P = 1 if seasonal else 0
     for p, q in itertools.product(range(p_max + 1), range(q_max + 1)):
-        spec = SarimaxSpec(p, d, q, P, 0)
+        spec = SarimaxSpec(p, d, q, P, 0, season)
         f = _fit_with_level(y, spec, exog)
         # 可比 AIC：统一丢弃最大滞后长度的样本
-        burn = (p_max + P * 12) - spec.max_lag()
+        burn = (p_max + P * season) - spec.max_lag()
         e = f.resid[burn:] if burn > 0 else f.resid
         n = len(e)
         if n < 10:
@@ -302,7 +302,7 @@ def spec_from_label(label: str):
 
 
 def expanding_backtest(y, months, start_idx, exog=None, seasonal=False, reselect_month="01", min_obs=36,
-                       progress=None, force_d=None, initial_spec=None):
+                       progress=None, force_d=None, initial_spec=None, season=12):
     """扩展窗口：对每个 t≥start_idx，仅用 y[:t] 估计并预测 y[t]；t=len(y) 为实时预测（下一期）。
     exog 需比 y 多 1 行（下一期外生变量已知：春节日期）。每年 1 月重选阶数，其余月份沿用阶数、重估参数。
     initial_spec：增量计算时沿用上次缓存的阶数（直到下一个 1 月再重选）。
@@ -319,7 +319,7 @@ def expanding_backtest(y, months, start_idx, exog=None, seasonal=False, reselect
         mon = months[t] if t < n else "__next__"
         if spec is None or (t < n and months[t][5:7] == reselect_month):
             d = force_d if force_d is not None else choose_d(yt)[0]
-            spec, fit = select_order(yt, et, d=d, seasonal=seasonal)
+            spec, fit = select_order(yt, et, d=d, seasonal=seasonal, season=season)
         else:
             fit = _fit_with_level(yt, spec, et, start_params=fit.params if fit is not None else None)
         xn = None if E is None else E[t]

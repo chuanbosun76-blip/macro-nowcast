@@ -16,10 +16,12 @@ import engine
 import live
 import llm
 import markets
+import methodology
+import reportgen
 import reports
 import store
 import theory
-from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES
+from indicators import BY_ID, GROUPS_ORDER, INDICATORS, L1_ORDER, L2_ORDER, LLM_MODES, hierarchy
 
 STATIC = config.ROOT
 app = Flask(__name__, static_folder=None)
@@ -98,7 +100,8 @@ def api_table():
     nr = not_ready()
     if nr:
         return nr
-    return jsonify(engine.data_table(request.args.get("country") or None, int(request.args.get("months", 24)), request.args.get("freq", "M")))
+    return jsonify(engine.data_table(request.args.get("country") or None, int(request.args.get("months", 24)),
+                                     request.args.get("freq", "M"), request.args.get("l1") or None))
 
 
 @app.get("/api/data.csv")
@@ -225,24 +228,146 @@ def api_board():
         return nr
     out = {}
     for c in ("CN", "US"):
-        rows = engine.overview(c)
-        groups = {}
-        for r in rows:
-            if r.get("missing"):
-                continue
-            b = r.get("basis") or {}
-            con = b.get("conclusion") or {}
-            hist = r.get("history") or []
-            groups.setdefault(r["group"], []).append({
-                "id": r["id"], "name": r["name"], "short": r["short"], "unit": r["unit"], "freq": r["freq"], "role": r["role"],
-                "last_month": r["last_month"], "last_value": r["last_value"], "prev_value": r.get("prev_value"),
-                "spark": [h[1] for h in hist[-12:]], "pending_month": r.get("pending_month"), "release_est": r.get("release_est"),
-                "pred": con.get("value"), "method": con.get("used"), "band": con.get("band"), "ai": bool(r.get("ai")),
-                "persist_corr": r.get("persist_corr"), "ar_corr": r.get("ar_corr"), "mf_corr": r.get("mf_corr"),
-                "sign": theory.for_indicator(BY_ID[r["id"]])["sign"],
-            })
-        out[c] = [{"group": g, "items": groups[g]} for g in GROUPS_ORDER if g in groups]
-    return jsonify({"board": out, "status": engine.status(), "markets": markets.status()})
+        rows = {r["id"]: r for r in engine.overview(c) if not r.get("missing")}
+        blocks = []
+        for blk in hierarchy(c):
+            gs = []
+            for g in blk["groups"]:
+                items = []
+                for i in g["ids"]:
+                    r = rows.get(i)
+                    if not r:
+                        continue
+                    ind = BY_ID[i]
+                    b = r.get("basis") or {}
+                    con = b.get("conclusion") or {}
+                    hist = r.get("history") or []
+                    items.append({
+                        "id": r["id"], "name": r["name"], "short": r["short"], "unit": r["unit"], "freq": r["freq"], "role": r["role"],
+                        "l1": ind["l1"], "l2": ind["l2"], "kind": ind["kind"], "theory": ind.get("theory"),
+                        "last_month": r["last_month"], "last_value": r["last_value"], "prev_value": r.get("prev_value"),
+                        "spark": [h[1] for h in hist[-12:]], "pending_month": r.get("pending_month"), "release_est": r.get("release_est"),
+                        "pred": con.get("value"), "method": con.get("used"), "band": con.get("band"), "ai": bool(r.get("ai")),
+                        "persist_corr": r.get("persist_corr"), "ar_corr": r.get("ar_corr"), "mf_corr": r.get("mf_corr"),
+                        "sign": theory.for_indicator(ind)["sign"],
+                    })
+                if items:
+                    gs.append({"l2": g["l2"], "items": items})
+            if gs:
+                blocks.append({"l1": blk["l1"], "groups": gs})
+        out[c] = blocks
+    return jsonify({"board": out, "status": engine.status(), "markets": markets.status(), "version": engine._state["version"]})
+
+@app.get("/api/hierarchy")
+def api_hierarchy():
+    """分层目录：一级分类 → 二级分类 → 指标（含最新值与待预测期）。"""
+    nr = not_ready()
+    if nr:
+        return nr
+    out = {}
+    for c in ("CN", "US"):
+        blocks = []
+        for blk in hierarchy(c):
+            gs = []
+            for g in blk["groups"]:
+                items = []
+                for i in g["ids"]:
+                    ind = BY_ID[i]
+                    ser = engine._state["series"].get(i) or {}
+                    if not ser.get("months"):
+                        continue
+                    items.append({"id": i, "name": ind["name"], "short": ind["short"], "unit": ind["unit"], "freq": ind["freq"],
+                                  "role": ind["role"], "theory": ind.get("theory"), "release": ind["release"],
+                                  "last_month": ser["months"][-1], "last_value": ser["values"][-1],
+                                  "n": len(ser["months"]), "start": ser["months"][0]})
+                if items:
+                    gs.append({"l2": g["l2"], "items": items})
+            if gs:
+                blocks.append({"l1": blk["l1"], "groups": gs})
+        out[c] = blocks
+    return jsonify({"hierarchy": out, "l1_order": L1_ORDER, "l2_order": L2_ORDER})
+
+
+@app.get("/api/evidence/<ind_id>")
+def api_evidence(ind_id):
+    nr = not_ready()
+    if nr:
+        return nr
+    if ind_id not in BY_ID:
+        return jsonify({"error": "未知指标"}), 404
+    e = engine.evidence_for(ind_id, with_market=request.args.get("market", "1") == "1")
+    return (jsonify(e), 200) if e else (jsonify({"error": "无数据"}), 404)
+
+
+@app.get("/api/views/<ind_id>")
+def api_views(ind_id):
+    nr = not_ready()
+    if nr:
+        return nr
+    if ind_id not in BY_ID:
+        return jsonify({"error": "未知指标"}), 404
+    return jsonify({"indicator": ind_id, "name": BY_ID[ind_id]["name"], "unit": BY_ID[ind_id]["unit"], "views": engine.views(ind_id)})
+
+
+@app.get("/api/methodology")
+def api_methodology():
+    return jsonify({"institutions": methodology.INSTITUTIONS, "formulas": methodology.FORMULAS, "factors": methodology.FACTORS,
+                    "framework": theory.FRAMEWORK})
+
+
+@app.get("/api/search")
+def api_search():
+    nr = not_ready()
+    if nr:
+        return nr
+    return jsonify(reportgen.search(request.args.get("q", ""), int(request.args.get("limit", 40))))
+
+
+@app.post("/api/sync")
+@need_auth
+def api_sync():
+    """一键更新：重新抓取数据库 → 重算全部模型 → 刷新市场与看板（各页面随后自动同步）。"""
+    j = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.sync_all(predict=bool(j.get("predict")), mode=j.get("mode", "title"), model=j.get("model")))
+
+
+@app.get("/api/sync_status")
+def api_sync_status():
+    return jsonify(engine.sync_status())
+
+
+@app.post("/api/ai/report")
+@need_auth
+def api_ai_report():
+    nr = not_ready()
+    if nr:
+        return nr
+    j = request.get_json(force=True) or {}
+    ind_id = j.get("indicator") or None
+    if ind_id and ind_id not in BY_ID:
+        return jsonify({"error": "未知指标"}), 400
+    try:
+        return jsonify(reportgen.ai_report(ind_id, j.get("country"), j.get("prompt", ""), j.get("model"), j.get("kind", "研报点评")))
+    except Exception as e:  # noqa
+        return jsonify({"error": str(e)}), 502
+
+
+@app.post("/api/export")
+def api_export():
+    nr = not_ready()
+    if nr:
+        return nr
+    j = request.get_json(force=True) or {}
+    kind = j.get("kind", "docx")
+    scope = j.get("scope", "indicator")
+    if kind not in ("docx", "xlsx", "pptx", "md"):
+        return jsonify({"error": "不支持的格式"}), 400
+    try:
+        data, fn, mime = reportgen.export(kind, scope, j.get("indicator"), j.get("country"), j.get("text"), j.get("title"))
+    except Exception as e:  # noqa
+        return jsonify({"error": str(e)}), 400
+    return Response(data, mimetype=mime, headers={"Content-Disposition": f"attachment; filename={fn}"})
+
 
 @app.post("/api/nowcast")
 @need_auth

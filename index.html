@@ -4,23 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>观数 · 宏观预测平台</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body>
 <div class="shell">
   <aside class="side">
     <div class="brand"><div class="seal">观</div><div><div class="brand-t">观数</div><div class="brand-s">MACRO NOWCAST</div></div></div>
     <nav id="nav">
-      <a href="#overview" data-v="overview"><b>总览</b><span>最新数据 · 当期预测</span></a>
-      <a href="#live" data-v="live"><b>实时看板</b><span>行情脉搏 · 发布日历 · 研报流</span></a>
-      <a href="#predict" data-v="predict"><b>预测中心</b><span>AI 研判 · 更新数据</span></a>
-      <a href="#data" data-v="data"><b>数据库</b><span>中美宏观 · 10 年+ 历史</span></a>
+      <a href="#overview" data-v="overview"><b>总览</b><span>分类 · 当期预测 · 依据</span></a>
+      <a href="#live" data-v="live"><b>实时看板</b><span>行情 · 全库数据 · 日历</span></a>
+      <a href="#predict" data-v="predict"><b>预测中心</b><span>月/季/年 · AI 研判</span></a>
+      <a href="#data" data-v="data"><b>数据库</b><span>月度 / 季度 / 年度</span></a>
+      <a href="#search" data-v="search"><b>搜索</b><span>指标 · 方法 · 因子</span></a>
+      <a href="#report" data-v="report"><b>报告生成</b><span>Word / PPT / Excel</span></a>
       <a href="#reports" data-v="reports"><b>研报</b><span>召回 · 直达链接</span></a>
-      <a href="#backtest" data-v="backtest"><b>回测</b><span>三法对照 · 相关性</span></a>
+      <a href="#backtest" data-v="backtest"><b>回测</b><span>五法对照 · 相关性</span></a>
       <a href="#archive" data-v="archive"><b>预测档案</b><span>每次研判的依据</span></a>
-      <a href="#ask" data-v="ask"><b>问 AI</b><span>基于最新数据问答</span></a>
-      <a href="#guide" data-v="guide"><b>使用教程</b><span>方法论 · 公式 · 如何用于投研</span></a>
-      <a href="#settings" data-v="settings"><b>设置</b><span>预测要求 · 数据源 · 模型</span></a>
+      <a href="#ask" data-v="ask"><b>问 AI</b><span>读我的数据库作答</span></a>
+      <a href="#guide" data-v="guide"><b>使用教程</b><span>方法论 · 公式 · 场景</span></a>
+      <a href="#settings" data-v="settings"><b>设置</b><span>预测要求 · 数据源</span></a>
     </nav>
     <div class="side-foot" id="sideStatus">连接中…</div>
   </aside>
@@ -29,10 +31,13 @@
     <header class="topbar">
       <div><div class="eyebrow">MACRO NOWCAST · 中国 / 美国</div><h1 id="viewTitle">总览</h1></div>
       <div class="topright">
+        <div class="gsearch"><span class="muted">🔍</span><input id="topSearch" placeholder="搜索指标 / 方法 / 因子" autocomplete="off"></div>
         <div class="seg" id="countrySeg"><button data-c="CN" class="on">中国</button><button data-c="US">美国</button></div>
+        <button class="btn gold" id="syncBtn" title="从内嵌数据库重新抓取并重算全部模型，看板 / 预测中心 / 数据库 / 回测 / 档案 同步更新">⟳ 一键更新</button>
         <div class="topmeta" id="topMeta"></div>
       </div>
     </header>
+    <div id="syncBar"></div>
 
     <!-- 总览 -->
     <section class="view" id="v-overview">
@@ -40,14 +45,13 @@
       <div id="ovGroups"><div class="skel">加载中…</div></div>
     </section>
 
-
     <!-- 实时看板 -->
     <section class="view live" id="v-live" hidden>
       <div class="live-top">
         <div class="live-clock"><span id="lvClock">--:--:--</span><span class="lv-sub" id="lvClockSub">北京时间 · 行情每 5 秒刷新</span></div>
         <div class="live-strip" id="lvStrip"></div>
       </div>
-      <div class="lv-h">宏观数据总表 <small id="lvBoardMeta">· 按分类 · 最新公布值 / 较上期 / 待发布期 / 推荐预测 / 理论传导方向 · 点击行看详情</small></div>
+      <div class="lv-h">宏观数据总表 <small id="lvBoardMeta">· 一级/二级分类 · 最新值 / 较上期 / 待发布 / 推荐预测 / 传导方向 · 点击行看完整依据</small></div>
       <div class="lv-board" id="lvBoard"><div class="skel">加载中…</div></div>
       <div class="live-grid" style="margin-top:18px">
         <div class="live-col">
@@ -55,9 +59,9 @@
           <div class="lv-quotes" id="lvQuotes"><div class="skel">连接行情…</div></div>
         </div>
         <div class="live-col">
-          <div class="lv-h">预测脉搏 <small>· 当期待公布指标：上期 → 推荐预测</small></div>
+          <div class="lv-h">预测脉搏 <small>· 当期待公布：上期 → 推荐预测</small></div>
           <div class="lv-pulse" id="lvPulse"><div class="skel">加载中…</div></div>
-          <div class="lv-h" style="margin-top:14px">发布日历 <small>· 未来 45 天（按各机构发布规律估算）</small></div>
+          <div class="lv-h" style="margin-top:14px">发布日历 <small>· 未来 45 天（按发布规律估算）</small></div>
           <div class="lv-cal" id="lvCal"><div class="skel">加载中…</div></div>
         </div>
         <div class="live-col">
@@ -70,20 +74,30 @@
     <!-- 预测中心 -->
     <section class="view" id="v-predict" hidden>
       <div class="panel">
-        <h2>运行预测</h2>
+        <h2>① 选择预测对象 <small>· 指标 + 频率（月度 / 季度 / 年度）+ 期数</small></h2>
+        <div class="ctl-row">
+          <label>指标<select id="pcInd"></select></label>
+          <div class="freq-tabs" id="pcFreq"></div>
+          <button class="btn primary" id="pcGo">查看结论与依据</button>
+          <span class="hint" id="pcHint"></span>
+        </div>
+        <div id="pcOut"><div class="skel">选择指标后显示：结论 → 不少于 5 条量化支撑 → 风险情景 → 对股债的含义</div></div>
+      </div>
+      <div class="panel">
+        <h2>② 运行 AI 研判 <small>· 读研报 + 读我的数据库</small></h2>
         <div class="ctl-row">
           <label>模型<select id="pModel"></select></label>
           <label>输入<select id="pMode"></select></label>
-          <label>预测月份<select id="pMonth"><option value="">当期（各指标最新待公布月）</option></select></label>
-          <button class="btn primary" id="pUpdate">⟳ 更新最新数据并预测全部待测指标</button>
-          <button class="btn" id="pRun">仅对勾选指标运行 AI 研判</button>
+          <label>预测期<select id="pMonth"><option value="">当期（各指标最新待公布期）</option></select></label>
+          <button class="btn primary" id="pUpdate">⟳ 更新数据并预测全部待测指标</button>
+          <button class="btn" id="pRun">仅对勾选指标运行</button>
         </div>
         <div class="chips" id="pInds"></div>
         <div class="target-list" id="pTargets"></div>
-        <p class="hint">流程：拉取最新官方数据 → 增量重算 SARIMAX → 召回当月研报 → AI 结合数据、统计模型与研报输出数值、区间、驱动因素、传导机制与风险。每个指标约 15–60 秒。选择历史月份可做“回到当时”的回测预测（只用该月截止前的研报与数据），结果与真实值对照。</p>
+        <p class="hint">流程：拉取最新官方数据 → 增量重算 SARIMAX / 多因子 / 桥方程 → 召回当期研报 → AI 结合数据、统计模型与研报输出数值、区间、驱动因素、传导机制与风险。每个指标约 15–60 秒。选择历史期可做“回到当时”的回测预测（只用该期截止前的信息）。</p>
         <div id="pJob"></div>
       </div>
-      <div class="panel"><h2>最新研判 <small>· 当期实时预测（点击展开原理与支撑）</small></h2><div id="pResults"><div class="skel">暂无</div></div></div>
+      <div class="panel"><h2>③ 最新研判 <small>· 当期实时预测（点击展开原理与支撑）</small></h2><div id="pResults"><div class="skel">暂无</div></div></div>
     </section>
 
     <!-- 数据库 -->
@@ -91,19 +105,80 @@
       <div class="panel">
         <h2>宏观数据库 <small id="tblMeta"></small></h2>
         <div class="ctl-row">
-          <label>频率<select id="tblFreq"><option value="M">月度</option><option value="Q">季度</option></select></label>
-          <label>范围<select id="tblMonths"><option value="12">近 12 期</option><option value="24" selected>近 24 期</option><option value="60">近 5 年</option><option value="120">近 10 年</option><option value="400">全部</option></select></label>
+          <div class="freq-tabs" id="tblFreqTabs"><button data-f="M" class="on">月度</button><button data-f="Q">季度</button><button data-f="A">年度</button></div>
+          <label>一级分类<select id="tblL1"><option value="">全部</option></select></label>
+          <label>范围<select id="tblMonths"><option value="12">近 12 期</option><option value="24" selected>近 24 期</option><option value="60">近 60 期</option><option value="120">近 120 期</option><option value="400">全部</option></select></label>
           <a class="btn ghost" id="csvAll" href="/api/data.csv">下载 CSV</a>
+          <button class="btn ghost" data-export="xlsx|data">导出 Excel（全库）</button>
           <button class="btn ghost" id="refreshData">⟳ 刷新数据源</button>
           <span class="hint" id="tblSrc"></span>
         </div>
+        <p class="hint">口径：月度指标聚合为季/年时，同比与指数取<b>期内均值</b>、流量取<b>期内合计</b>、存量取<b>期末值</b>（带 * 号表示由月度聚合或桥方程派生）；季度 GDP 的月度列为<b>桥方程追踪值</b>。</p>
         <div class="tbl-wrap"><table class="data" id="dataTable"></table></div>
       </div>
       <div class="panel">
-        <h2>序列走势</h2>
-        <div class="ctl-row"><label>指标<select id="serInd"></select></label><label>起始<input type="month" id="serFrom" value="2016-01"></label><span class="hint" id="serNotes"></span></div>
+        <h2>序列走势与多频率对照</h2>
+        <div class="ctl-row"><label>指标<select id="serInd"></select></label><label>起始<input type="month" id="serFrom" value="2016-01"></label>
+          <button class="btn ghost sm" data-export="xlsx|indicator">导出该指标 Excel</button><span class="hint" id="serNotes"></span></div>
         <div class="chart" id="serChart"></div>
         <div class="diag" id="serDiag"></div>
+        <div id="serViews"></div>
+      </div>
+    </section>
+
+    <!-- 搜索 -->
+    <section class="view" id="v-search" hidden>
+      <div class="panel">
+        <h2>全站搜索 <small>· 指标 / 市场 / 机构方法论 / 计算方法 / 预测因子</small></h2>
+        <div class="ctl-row">
+          <input type="text" id="sqInput" placeholder="例如：CPI、出口、GDPNow、岭回归、翘尾、猪价、桥方程" style="min-width:340px">
+          <button class="btn primary" id="sqGo">搜索</button>
+          <span class="hint">支持指标名、别名、关键词、理论驱动因素、公式名与机构名</span>
+        </div>
+        <div class="chips" id="sqQuick"></div>
+        <div id="sqOut"><div class="skel">输入关键词开始搜索</div></div>
+      </div>
+    </section>
+
+    <!-- 报告生成 -->
+    <section class="view" id="v-report" hidden>
+      <div class="panel">
+        <h2>一键导出 <small>· 直接从内嵌数据库生成，含结论、依据、数据表、方法论</small></h2>
+        <div class="ctl-row">
+          <label>指标<select id="rgInd"></select></label>
+          <button class="btn" data-export="docx|indicator">Word 报告</button>
+          <button class="btn" data-export="pptx|indicator">PPT 简报</button>
+          <button class="btn" data-export="xlsx|indicator">Excel 数据</button>
+          <button class="btn" data-export="md|indicator">Markdown</button>
+        </div>
+        <div class="ctl-row">
+          <span class="hint">整站：</span>
+          <button class="btn ghost" data-export="docx|overview">总览 Word</button>
+          <button class="btn ghost" data-export="pptx|deck">看板 PPT</button>
+          <button class="btn ghost" data-export="xlsx|data">全库 Excel（6 张表）</button>
+          <button class="btn ghost" data-export="md|overview">总览 Markdown</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>AI 写作 <small>· 用你的 prompt + 我的数据库，输出可直接用的研报</small></h2>
+        <div class="ctl-row">
+          <label>范围<select id="aiScope"><option value="">全库（当前国家）</option></select></label>
+          <label>体裁<select id="aiKind"><option>数据点评</option><option>月度宏观策略报告</option><option>晨会纪要</option><option>投资委员会简报</option><option>债市策略</option><option>股市策略</option></select></label>
+          <label>模型<select id="aiModel"></select></label>
+          <button class="btn primary" id="aiGo">生成</button>
+        </div>
+        <textarea id="aiPrompt" rows="4" placeholder="写给 AI 的要求，例如：
+- 面向投资委员会，800 字以内，结论先行
+- 重点说明出口与信贷的背离，给出对利率债久期的操作建议
+- 每条依据必须带数字，引用平台的回测 RMSE 与传导 β
+- 最后给出未来两周需要跟踪的三个高频指标"></textarea>
+        <div class="ctl-row" style="margin-top:8px">
+          <button class="btn ghost" data-export="docx|ai">导出 Word</button>
+          <button class="btn ghost" data-export="pptx|ai">导出 PPT</button>
+          <button class="btn ghost" data-export="md|ai">导出 Markdown</button>
+          <span class="hint" id="aiMeta"></span>
+        </div>
+        <div id="aiOut" class="prose"></div>
       </div>
     </section>
 
@@ -135,10 +210,11 @@
     <!-- 回测 -->
     <section class="view" id="v-backtest" hidden>
       <div class="panel">
-        <h2>回测对比 <small>· 预测值与真实值的相关系数，扩展窗口，越高越好</small></h2>
+        <h2>回测对比 <small>· 扩展窗口、逐期只用当时可得信息；相关系数越高越好，同时看 RMSE</small></h2>
         <div class="ctl-row">
           <label>起<input type="month" id="btFrom"></label><label>止<input type="month" id="btTo"></label>
           <label>AI 模型<select id="btModel"><option value="">全部</option></select></label>
+          <label>口径<select id="btMetric"><option value="corr">相关系数</option><option value="rmse">RMSE</option><option value="hit">方向命中率</option></select></label>
           <button class="btn" id="btGo">重新计算</button>
         </div>
         <div class="tbl-wrap"><table class="bt" id="btTable"></table></div>
@@ -149,20 +225,20 @@
         <div class="chart" id="btChart"></div>
       </div>
       <div class="panel">
-        <h2>AI 历史回测 <small>· 用每月当时可得的研报与数据逐月预测，得到 AI 那一列的相关性</small></h2>
+        <h2>AI 历史回测 <small>· 用每期当时可得的研报与数据逐期预测</small></h2>
         <div class="ctl-row">
           <label>起<input type="month" id="llmFrom" value="2024-01"></label><label>止<input type="month" id="llmTo"></label>
           <label>模型<select id="llmModel"></select></label>
           <label>输入<select id="llmMode"></select></label>
         </div>
         <div class="chips" id="llmInds"></div>
-        <div class="ctl-row"><button class="btn primary" id="llmGo">运行 AI 回测</button><span class="hint">已跑过的月份自动跳过；研报库自 2017 年起</span></div>
+        <div class="ctl-row"><button class="btn primary" id="llmGo">运行 AI 回测</button><span class="hint">已跑过的期自动跳过；研报库自 2017 年起</span></div>
         <div id="llmJob"></div>
       </div>
       <div class="panel">
         <h2>泄漏检验</h2>
         <div class="ctl-row"><label>指标<select id="leakInd"></select></label><label>切分月<input type="month" id="leakSplit"></label><button class="btn" id="leakGo">检验</button>
-          <span class="hint">对比模型训练截止前后的表现，判断回测是否受“记住未来”影响</span></div>
+          <span class="hint">对比模型知识截止前后的表现，判断回测是否受“记住未来”影响</span></div>
         <div id="leakOut"></div>
       </div>
     </section>
@@ -185,195 +261,35 @@
     <!-- 问 AI -->
     <section class="view" id="v-ask" hidden>
       <div class="panel ask">
-        <h2>问 AI <small>· 已注入中美全部指标最新数据、三种方法的当期预测与回测表现</small></h2>
+        <h2>问 AI <small>· 已注入中美全部指标最新数据、五种方法的当期预测与回测表现</small></h2>
         <div class="ctl-row"><label>模型<select id="askModel"></select></label><button class="btn ghost sm" id="askClear">清空对话</button>
-          <span class="hint">示例：下月美国非农大概多少？中国出口高增长能持续吗？CPI 环比预测转正的依据是什么？</span></div>
-        <div class="chat" id="chatBox"><div class="msg ai">你好，我是观数研究助手。我已读取中国与美国全部宏观指标的最新公布值、SARIMAX 与 AI 的当期预测及回测表现，可以直接问我数据、预测和逻辑。</div></div>
+          <span class="hint">示例：下月美国非农大概多少？中国出口高增长能持续吗？CPI 预测的翘尾贡献是多少？</span></div>
+        <div class="chat" id="chatBox"><div class="msg ai">你好，我是观数研究助手。我已读取中国与美国全部宏观指标的最新公布值、五种方法的当期预测与回测表现，可以直接问我数据、预测和逻辑；也可以让我按你的格式写一段点评。</div></div>
         <div class="ask-row"><textarea id="askInput" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea><button class="btn primary" id="askSend">发送</button></div>
       </div>
     </section>
 
     <!-- 使用教程 -->
     <section class="view" id="v-guide" hidden>
-      <div class="panel guide">
-        <div class="toc">
-          <a href="#g1">1 平台是什么</a><a href="#g2">2 五分钟上手</a><a href="#g3">3 四种预测方法与公式</a>
-          <a href="#g4">4 回测与检验</a><a href="#g5">5 传导分析</a><a href="#g6">6 分析师工作流</a>
-          <a href="#g7">7 数据字典</a><a href="#g8">8 局限与纪律</a>
-        </div>
-
-        <h2 id="g1">一、平台是什么</h2>
-        <p>这是一个<b>宏观指标实时预测（nowcasting）+ 资产传导</b>平台。它解决的问题是：官方数据有 1–6 周的发布时滞，在数据公布前，市场已经在对它定价。平台把<b>公布前可得的一切信息</b>——指标自身的历史规律、同期已公布的关联指标、当月券商研报的集体判断——压缩成一个带区间的数值预测，并给出<b>这个预测如果兑现，对股债的历史含义</b>。</p>
-        <p>覆盖范围：中国 22 项、美国 25 项月度/季度宏观指标，历史自 2005–2008 年起（多数 200+ 期）；市场数据库含中美港 7 个主要股指与中美 2Y/10Y 国债收益率，2005 年起月度。数据每小时自动轮询更新，有新数据可自动触发预测。</p>
-        <div class="callout">与 Wind / iFinD 的关系：那些终端是<b>数据的权威来源与查询工具</b>，本平台是<b>数据之上的预测与归因层</b>。终端告诉你"8 月出口同比是多少"，本平台回答"9 月出口大概率是多少、凭什么这么判断、如果对了 A 股出口链会怎样"。两者互补，不替代。</div>
-
-        <h2 id="g2">二、五分钟上手</h2>
-        <h3>场景 A：我想知道下个月某指标会是多少</h3>
-        <p>进入 <b>总览</b> → 选国家 → 找到指标卡片。卡片顶部写明"本次预测 → 2026年9月数据 · 预计 10/15 公布"，这就是预测对象；下面四个方框是四种方法各自的答案，红框是按回测择优推荐的那个。点开卡片里的 <b>「预测依据 · 为什么这样预测」</b>，能看到每种方法的完整推导（样本期、模型阶数、检验 p 值、回测表现、置信区间）。点 <b>「详情」</b> 打开抽屉，里面有历史曲线对照、AI 研判全文、引用研报直达链接、以及<b>传导分析表</b>。</p>
-        <h3>场景 B：我想让 AI 现在就跑一次预测</h3>
-        <p>进入 <b>预测中心</b> → 选模型（DeepSeek / Claude）→ 选输入方式（推荐"研报标题 + 数据研判"）→ 勾选指标 → 点"仅对勾选指标运行 AI 研判"。或直接点 <b>「更新最新数据并预测全部待测指标」</b>，会先拉取最新官方数据、增量重算统计模型，再对所有待公布指标跑一遍 AI。每个指标约 15–60 秒。</p>
-        <h3>场景 C：我想验证这套方法到底准不准</h3>
-        <p>进入 <b>回测</b>：上方表格是 2014 年以来各方法与真实值的相关系数逐指标对照，绿色高亮是该指标的最优方法。AI 那几列默认为空——因为 AI 回测需要真金白银调用模型，请在下方 <b>「AI 历史回测」</b> 里选指标、选区间（研报库自 2017 年起）、点运行，跑完后相关系数会自动填入。最下方 <b>「泄漏检验」</b> 用于验证大模型是否"记住了未来"（详见第 4 节）。</p>
-        <h3>场景 D：我想按自己的框架定制</h3>
-        <p>进入 <b>设置</b>：「预测要求」里写给 AI 的附加指令（例如"CPI 预测必须拆分食品/能源/核心三项"、"优先引用中金、中信观点"），会注入到每一次预测与问答的 Prompt 中；<b>研报</b> 页的「召回规则」可增删关键词、限定机构、排除日报周报。</p>
-
-        <h2 id="g3">三、四种预测方法与数学公式</h2>
-        <p>对每个待测指标，平台<b>同时</b>跑四种方法，并按历史回测表现推荐其一。四种方法的信息集是递进的：从只用自身上期，到用自身全部历史，到用全体关联指标，再到用文本信息。</p>
-
-        <h3>方法一：沿用上期（Random Walk 基准）</h3>
-        <div class="formula">ŷ<sub>t</sub> = y<sub>t−1</sub></div>
-        <p>看似简单，但它是所有预测研究的<b>基准线（benchmark）</b>。金融计量的一个经典结论是：对高持续性序列，随机游走极难被战胜。若某方法跑不赢它，说明该方法没有提取到额外信息。平台的决策规则中，当 corr(y<sub>t</sub>, y<sub>t−1</sub>) ≥ 0.8（惯性极强）时直接采用本方法，除非多因子模型能显著超越（提升 ≥ 0.05）。</p>
-
-        <h3>方法二：SARIMAX（季节性 + 外生变量的时间序列模型）</h3>
-        <p>完整设定为回归项 + SARIMA 误差结构：</p>
-        <div class="formula">y<sub>t</sub> = β′x<sub>t</sub> + η<sub>t</sub>，　φ(L)(1−L)<sup>d</sup>(1−L<sup>12</sup>)<sup>D</sup> η<sub>t</sub> = θ(L) ε<sub>t</sub>，　ε<sub>t</sub> ~ WN(0, σ²)</div>
-        <p>其中 φ(L) = 1 − φ<sub>1</sub>L − … − φ<sub>p</sub>L<sup>p</sup> 为自回归多项式，θ(L) = 1 + θ<sub>1</sub>L + … + θ<sub>q</sub>L<sup>q</sup> 为移动平均多项式，L 为滞后算子（L y<sub>t</sub> = y<sub>t−1</sub>）。</p>
-        <p><b>外生变量 x<sub>t</sub>（春节效应）</b>：中国 1–2 月数据受农历春节错位严重干扰。平台用 2008–2035 年农历新年日期表，构造当月春节假期天数占比：</p>
-        <div class="formula">x<sub>t</sub> = （落在月 t 内的春节假期天数）/（月 t 的天数）</div>
-        <p>对 CPI 环比、社零、贸易差额等季节敏感指标启用（卡片上标注"春节"标签）。</p>
-        <p><b>差分阶数 d 的确定</b>：先做 ADF（Augmented Dickey–Fuller）单位根检验，回归式为</p>
-        <div class="formula">Δy<sub>t</sub> = α + ρ y<sub>t−1</sub> + Σ<sub>i=1..k</sub> γ<sub>i</sub> Δy<sub>t−i</sub> + ε<sub>t</sub>，　检验 H<sub>0</sub>: ρ = 0（存在单位根）</div>
-        <p>t 统计量按 MacKinnon 临界值表转换为 p 值。p &lt; 0.05 拒绝原假设（序列平稳）→ d = 0；否则 d = 1。部分指标（如 CPI 环比）按经济含义强制 d = 0。</p>
-        <p><b>阶数 (p, q) 的选择</b>：在 p ≤ 3、q ≤ 2 的网格上最小化 AIC：</p>
-        <div class="formula">AIC = 2k − 2 ln L̂ = n ln(σ̂²) + 2k + const</div>
-        <p>k 为参数个数，L̂ 为极大似然值。平台<b>每年 1 月重选一次阶数</b>，模拟真实场景下分析师定期重估模型的做法。</p>
-        <p><b>参数估计</b>：条件平方和（CSS）法，用 scipy 的 Levenberg–Marquardt 最小二乘最小化 Σ ε<sub>t</sub>²。AR 部分的平稳性通过 PACF 变换（Barndorff-Nielsen–Schou 变换）参数化，保证特征根始终落在单位圆内。</p>
-        <p><b>残差检验</b>：Ljung–Box Q 统计量检验残差是否为白噪声：</p>
-        <div class="formula">Q(m) = n(n+2) Σ<sub>k=1..m</sub> ρ̂<sub>k</sub>² / (n−k) ~ χ²(m−p−q)</div>
-        <p>p 值大（如 &gt; 0.05）说明残差无显著自相关，模型已充分提取线性信息。详情抽屉里的"ADF p / LB p"即此二项。</p>
-        <p><b>预测区间</b>：取最近 36 期样本外残差的标准差 σ̂，按正态近似给出 80% 区间 ŷ ± 1.28 σ̂。这是<b>经验区间</b>而非理论区间，因为它直接来自模型在真实回测中的表现，比参数化区间更诚实。</p>
-
-        <h3>方法三：多因子岭回归（横截面信息）</h3>
-        <p>SARIMAX 只用指标自身历史。但现实中，出口的线索藏在 PMI 新订单和进口里，信贷的线索藏在 M1 和社零里。方法三把<b>同一国家全部月度指标</b>纳入特征集：</p>
-        <div class="formula">y<sub>t</sub> = α + Σ<sub>j</sub> β<sub>j</sub> z<sub>j,t</sub> + ε<sub>t</sub>，　z<sub>j,t</sub> = (x<sub>j,t</sub> − μ<sub>j</sub>) / σ<sub>j</sub></div>
-        <p>特征 x<sub>j,t</sub> 包含：自身滞后 1 期、2 期、12 期（捕捉惯性与年度季节性）；以及每个关联指标——<b>领先指标</b>（PMI、ISM、消费者信心、政策利率，当月即公布）取当期值，<b>其余指标</b>取滞后 1 期（因为预测 t 月时 t 月数据尚未公布，只有 t−1 月可得）。这一设定严格保证了<b>信息可得性</b>，不存在前视偏差。</p>
-        <p><b>为什么用岭回归而非 OLS</b>：特征数可达 20+ 而有效样本仅 150–250，且宏观指标间高度共线（M1 与 M2、社零同比与累计同比）。OLS 在共线下方差爆炸。岭回归加 L2 惩罚：</p>
-        <div class="formula">β̂<sub>ridge</sub> = argmin<sub>β</sub> { ‖y − Zβ‖² + λ‖β‖² } = (Z′Z + λI)<sup>−1</sup> Z′y</div>
-        <p>λ = 1（特征已标准化）。这在偏差-方差权衡中用少量偏差换取大幅方差下降，即 James–Stein 收缩的思想。</p>
-        <p><b>特征筛选防泄漏</b>：只用回测起点<b>之前</b>的样本（约前 36–72 期）计算 |corr(x<sub>j</sub>, y)| 排序，取前 8 个特征，并强制保留自身滞后 1 期。若用全样本筛选特征，回测结果会被严重高估——这是量化研究中最常见的作弊形式之一。</p>
-        <p><b>扩展窗口重估</b>：预测第 t 期时，模型只用 1…t−1 期数据拟合，每 3 个月（及每年 1 月）重新估计一次系数。</p>
-        <p>预测依据面板里会列出被选中的特征与标准化系数（绝对值前 5），可直接读作"该指标当前主要由哪几个变量驱动"。</p>
-
-        <h3>方法四：AI 研判（文本 + 数据 + 模型）</h3>
-        <p>前三种方法都无法读取"文字"。但券商研报里包含高频跟踪数据（港口吞吐、开工率、票据利率、乘用车批发）、政策解读与拐点判断——这些是数值序列里没有的信息。方法四把当月研报交给大模型：</p>
-        <ol>
-          <li><b>召回</b>：从东方财富研报中心抓取目标月内发布的全部宏观研究 + 策略报告（通常每月 200–400 篇），按指标关键词（如出口指标用"出口/外贸/关税/海关/集装箱/港口/订单"）+ 用户自定义规则筛选、去重，得到相关标题列表（含机构、日期、直达链接）。</li>
-          <li><b>严格时点截断</b>：只取<b>目标月最后一天及之前</b>发布的研报。回测某个历史月时，系统自动把 cutoff 设为该月末，绝不会读到之后的文章。</li>
-          <li><b>组装 Prompt</b>：目标指标近 24 期历史、同国关联指标最新值、沿用上期值、SARIMAX 预测值及其回测相关性、多因子回归预测值及其特征、该指标的理论驱动因素、研报标题列表、用户附加要求。</li>
-          <li><b>结构化输出</b>：强制模型返回 JSON，包含 forecast（数值）、low/high（区间）、direction、confidence、summary、drivers（驱动因素）、mechanism（传导机制）、evidence（证据，须指向具体研报）、risks（风险）、vs_models（与统计模型的差异及原因）。</li>
-        </ol>
-        <p>四种输入变体可在"输入"下拉中切换：<b>研报标题</b>（推荐，信噪比最高）、<b>研报正文片段</b>（信息更全但噪声大、成本高）、<b>标题 + 自回归参考</b>（强调统计锚定）、<b>仅数据</b>（对照组，用于分离"研报到底有没有用"）。</p>
-
-        <h3>方法择优的决策规则</h3>
-        <p>推荐哪一种不是拍脑袋，而是按固定规则从回测表现推出：</p>
-        <table>
-          <tr><th>条件</th><th>推荐</th><th>含义</th></tr>
-          <tr><td>corr<sub>persist</sub> ≥ 0.8 且多因子未显著超越</td><td>沿用上期</td><td>惯性主导，任何模型都是噪声</td></tr>
-          <tr><td>AI 回测样本 ≥ 12 期</td><td>同窗口 corr 最高者</td><td>有实证证据时以证据为准</td></tr>
-          <tr><td>corr<sub>mf</sub> ≥ 0.5 且超越其余方法</td><td>多因子回归</td><td>横截面信息有效</td></tr>
-          <tr><td>corr<sub>ar</sub> ≥ 0.5 且超越沿用上期 0.05+</td><td>SARIMAX</td><td>时序结构有效</td></tr>
-          <tr><td>corr<sub>persist</sub> ≥ 0.7</td><td>沿用上期</td><td>统计模型无显著提升</td></tr>
-          <tr><td>以上皆不满足</td><td>AI 研判</td><td>惯性弱、外生冲击主导，需读文本</td></tr>
-        </table>
-
-        <h2 id="g4">四、回测方法与三重检验</h2>
-        <h3>扩展窗口回测（Expanding Window）</h3>
-        <p>预测第 t 期时只用 1…t−1 期的信息重新拟合模型，逐月推进，绝不使用未来数据。这与"用全样本拟合一次再看拟合优度"有本质区别——后者是<b>样本内拟合</b>，几乎必然好看，但没有任何预测意义。</p>
-        <h3>四个评价指标</h3>
-        <div class="formula">corr = Cov(y, ŷ) / (σ<sub>y</sub> σ<sub>ŷ</sub>)　　RMSE = √( Σ(ŷ<sub>t</sub> − y<sub>t</sub>)² / n )　　MAE = Σ|ŷ<sub>t</sub> − y<sub>t</sub>| / n　　方向命中率 = (1/n) Σ 1{ sign(ŷ<sub>t</sub> − y<sub>t−1</sub>) = sign(y<sub>t</sub> − y<sub>t−1</sub>) }</div>
-        <p>平台主排序用 <b>corr</b>（与中金研究口径一致，便于横向比较），但请同时看 RMSE：corr 高而 RMSE 大意味着"方向对、幅度错"。对交易而言方向命中率往往更重要。</p>
-        <div class="callout"><b>相关系数怎么读</b>：0.9+ 通常来自高惯性指标（如 M2、美国 CPI 同比），此时"预测"的贡献其实很小；0.5–0.7 对波动型指标（出口、信贷、非农）已属相当好；低于 0.3 说明该指标基本不可预测，应当承认而非强行给数。</div>
-        <h3>泄漏检验（Leakage Test）</h3>
-        <p>大模型的训练数据可能已包含历史宏观数据。若模型"记得"2019 年 8 月出口是多少，回测就毫无意义。检验方法：以模型知识截止日为界（默认 2025-01）把回测样本切成两段，比较：</p>
-        <div class="formula">Δ = corr<sub>截止前</sub> − corr<sub>截止后</sub></div>
-        <p>若 Δ 很大（如 0.9 vs 0.3），说明历史段的优异表现来自记忆而非推理，AI 的真实能力应以<b>截止后</b>那一段为准。平台同时给出同窗口的沿用上期基准，排除"某段时期本身就好预测"的干扰。</p>
-        <h3>可复现性</h3>
-        <p>每一次预测都写入<b>预测档案</b>：目标月、信息截止日、完整 Prompt、模型原始输出、思考过程、引用研报清单、耗时与 token 数。任何一个数字都可以点进去看到它是怎么来的，也可导出 CSV 做二次分析。</p>
-
-        <h2 id="g5">五、传导分析：预测出来能干什么</h2>
-        <p>预测本身不是终点。分析师真正要回答的是"这个数据出来，我该买什么"。传导分析回答三个问题：理论上该怎样、历史上实际怎样、这次预测隐含多大冲击。</p>
-        <h3>惊喜（Surprise）的构造</h3>
-        <p>市场对<b>预期差</b>定价，不对水平定价。缺乏 Bloomberg 一致预期数据时，标准学术做法是用时间序列模型的事前预测作为预期代理（Andersen–Bollerslev–Diebold–Vega 2003 的方法）：</p>
-        <div class="formula">s<sub>t</sub> = y<sub>t</sub> − ŷ<sub>t|t−1</sub>　（ŷ 为 SARIMAX 扩展窗口事前预测，缺失时退化为上期值）</div>
-        <p>并按其标准差标准化：z<sub>t</sub> = s<sub>t</sub> / σ<sub>s</sub>。</p>
-        <h3>事件回归</h3>
-        <div class="formula">r<sub>t+k</sub> = α + β · s<sub>t</sub> + ε<sub>t</sub></div>
-        <p>其中 r 为<b>数据公布当月</b>的市场反应：股指取月度对数收益率 r = 100·ln(P<sub>t</sub>/P<sub>t−1</sub>)（单位 %），国债收益率取月度变动（单位 bp）。k 为发布时滞（大多数月度指标次月公布，k = 1；PMI 当月公布，k = 0；贸易帐等隔月公布，k = 2）。</p>
-        <p>报表中每一列的含义：</p>
-        <table>
-          <tr><th>列</th><th>含义与读法</th></tr>
-          <tr><td>理论方向</td><td>经济学框架下"正向惊喜"应导致的方向（见下）。○ 表示方向取决于所处周期。</td></tr>
-          <tr><td>β（每 1σ 惊喜）</td><td>惊喜每超预期 1 个标准差，该资产当月的平均反应（股指 %，债券 bp）。这是<b>标准化 β</b>，可跨资产比较。</td></tr>
-          <tr><td>t 值</td><td>β / SE(β)。|t| ≥ 1.96 标记 *，即 5% 水平显著。样本 n≥24 才计算。</td></tr>
-          <tr><td>R²</td><td>该惊喜解释了市场月度波动的百分之几。<b>普遍在 0–5%，这是正常的</b>——若某个宏观数据能解释 30% 的月度收益，那才该怀疑数据有误。</td></tr>
-          <tr><td>方向一致率</td><td>惊喜与市场反应同号的比例。50% 为随机，持续 &gt;55% 才有意义。</td></tr>
-          <tr><td>正/负惊喜均值反应</td><td>非参数视角：把样本按惊喜正负分组，看两组的平均市场反应。可检查关系是否对称（常见的是"利空反应大于利多"）。</td></tr>
-          <tr><td>两个月累计 β</td><td>把公布当月与次月收益相加再回归，检验冲击是持续还是反转。若两月 β 显著小于单月 β，说明市场当月反应过度、次月修正。</td></tr>
-          <tr><td>近 5 年 β</td><td>仅用最近 60 期样本估计。与全样本 β 差异大 = 关系不稳定，应以近期为准。</td></tr>
-          <tr><td>理论 vs 实证</td><td>✓ 一致 / ✗ 相反。出现 ✗ 且 t 值显著时值得深究——往往意味着该变量在当前周期被市场赋予了相反解读（"坏消息=好消息"）。</td></tr>
-          <tr><td>本次隐含</td><td>= β × z<sub>本次</sub>，即"若本次预测兑现，按历史关系该资产当月的隐含反应"。这是把宏观预测翻译成资产观点的直接桥梁。</td></tr>
-        </table>
-        <h3>五条传导渠道（理论方向的来源）</h3>
-        <p><b>① 盈利渠道（分子）</b>：增长类数据 → 企业营收与盈利预期 → 股指。数据强则股指偏多。</p>
-        <p><b>② 贴现率渠道（分母）</b>：通胀与就业数据 → 央行政策路径 → 无风险利率 → 估值。通胀超预期则长久期资产（成长股、长债）受损最重。这解释了为什么美国 CPI 对纳指的负向 β 通常大于对道指。</p>
-        <p><b>③ 流动性渠道</b>：中国信贷/社融 → 实体融资与资金面。信贷脉冲扩张领先经济企稳 3–6 个月，是 A 股顺周期板块最重要的择时变量之一。</p>
-        <p><b>④ 汇率与跨境渠道</b>：美国数据强 → 美元与美债收益率上行 → 新兴市场资金外流、人民币承压 → A/H 股受压。这是"美国数据影响中国股市"的主通道，也是本平台对中美两国指标都给出跨市场传导的原因。</p>
-        <p><b>⑤ 状态依赖</b>：同一数据在不同周期符号相反。典型如美国非农：扩张期"弱非农 = 降息预期 = 股市涨"，衰退担忧期"弱非农 = 衰退确认 = 股市跌"。因此平台同时给出全样本 β 与近 5 年 β，两者背离时以近期为准，并在 AI 研判中要求模型说明当前处于哪种状态。</p>
-        <div class="callout">纪律：R² 低意味着这些关系<b>只能用于方向判断与相对强弱排序</b>（例如"这次 CPI 超预期，对创业板的压力大于沪深300"），不能作为单一交易信号。真正的数据日交易需要分钟级数据与期权隐含波动率，不在本平台范围内。</div>
-
-        <h2 id="g6">六、分析师工作流建议</h2>
-        <h3>月度循环</h3>
-        <ol>
-          <li><b>月初（1–5 日）</b>：看 <b>实时看板</b> 的发布日历，确认本月关键数据日程；对 PMI/ISM 等当月公布的景气指标先跑一轮预测。</li>
-          <li><b>数据周前 2–3 天</b>：进入 <b>预测中心</b>，点"更新最新数据并预测全部待测指标"。此时当月研报已积累到一定数量，AI 研判的信息量最充分。</li>
-          <li><b>写观点</b>：打开重点指标的 <b>详情</b>，把"预测依据"四段直接作为逻辑框架——沿用上期给基准、SARIMAX 给季节性与惯性、多因子给横截面驱动、AI 给政策与高频线索；<b>传导分析表</b>给资产含义。研报引用链接可直接放进底稿。</li>
-          <li><b>数据公布后</b>：回到 <b>预测档案</b> 对照预测值与真实值，记录偏差原因。系统会自动把新数据并入序列、重算模型，下个月的预测随之改进。</li>
-          <li><b>季度复盘</b>：在 <b>回测</b> 页把区间设为最近一年，检查各方法的相关系数是否发生结构性变化；必要时在设置里调整预测要求或研报召回规则。</li>
-        </ol>
-        <h3>把预测转化为投资观点的三个层次</h3>
-        <p><b>宏观层</b>：多个指标的预测合在一起就是对当前经济动能的判断。例如同时预测到出口走弱、信贷不及预期、PPI 继续负增长，指向"总需求不足 + 通缩压力"，对应的政策预期是降准降息与财政加码。</p>
-        <p><b>债市</b>：增长与通胀预测直接对应收益率方向。预测 CPI 低于预期 + 信贷收缩 → 降息空间打开 → 做多利率债；同时看传导表中该指标对中债 10Y 的 β 与近期稳定性。曲线形态上，通胀惊喜主要冲击短端（2Y，政策预期），增长惊喜主要冲击长端（10Y，期限溢价与名义增速）。</p>
-        <p><b>股市</b>：分子看增长（工业、社零、出口），分母看通胀与利率。传导表给出对沪深300 / 创业板 / 恒生 / 标普 / 纳指的差异化 β——创业板与纳指久期长，对利率与通胀惊喜更敏感；沪深300 与道指偏价值，对增长惊喜更敏感。板块层面可按指标映射：出口 → 电子/机械/纺服；信贷 → 银行/建材/地产链；PPI → 煤炭/有色/化工；社零 → 食饮/家电/汽车。</p>
-        <h3>什么时候不要相信这个平台</h3>
-        <p>① 该指标的最优方法回测相关系数低于 0.3（平台会推荐 AI，但本质上是承认统计不可预测）；② 出现结构性断裂（口径调整、疫情、政策框架突变），历史关系失效；③ AI 研判的置信度标为"低"或其区间宽度超过指标自身波动率；④ 传导表中理论与实证符号相反且 t 值不显著——此时两边都不足以支撑结论。</p>
-
-        <h2 id="g7">七、数据字典与更新机制</h2>
-        <table>
-          <tr><th>数据类别</th><th>来源</th><th>历史</th><th>更新</th></tr>
-          <tr><td>中国宏观 22 项</td><td>国家统计局 / 海关总署 / 中国人民银行口径，经东方财富数据中心</td><td>2008–2010 年起</td><td>每小时轮询，新数据自动入库并重算</td></tr>
-          <tr><td>美国宏观 25 项</td><td>东方财富·全球宏观（转载 BLS / BEA / Census / ISM / 美联储官方发布值）为主源；FRED 为备源</td><td>2008 年起</td><td>同上</td></tr>
-          <tr><td>股指月度</td><td>东方财富 K 线（备源：腾讯行情）</td><td>2005 年起（创业板 2010 年）</td><td>每 6 小时 + 当月用实时价刷新</td></tr>
-          <tr><td>国债收益率月均</td><td>东方财富国债收益率表（中债登 / 美国财政部口径）</td><td>2005 年起</td><td>同上</td></tr>
-          <tr><td>研报</td><td>东方财富研报中心（宏观研究 + 策略报告）</td><td>2017 年起</td><td>按月抓取并缓存，当月每 2 小时刷新</td></tr>
-          <tr><td>实时行情</td><td>东方财富 push2（备源：腾讯行情、东财数据中心日频收益率）</td><td>日内</td><td>5 秒</td></tr>
-        </table>
-        <p><b>三级回退机制</b>：实时抓取失败 → 本地缓存 → 内置快照。任何时候平台都能启动并给出数据，侧栏与数据页会明确标注当前数据源（"实时"/"本地缓存"/"内置快照"），绝不静默使用过期数据。若某指标在服务器端确实取不到，该指标会从界面中自动隐藏，而不是显示空卡片。</p>
-        <p><b>口径说明</b>：美国指标采用官方<b>发布口径</b>（headline，与研报和新闻中的数字一致），而非 FRED 的指数再计算口径，二者在个别月份可能有 0.1 的舍入差异。中国 1–2 月合并发布的指标（工业增加值、社零）自动剔除 1 月，避免春节错位造成的伪波动。70 城房价取当月所有城市新建商品住宅同比的算术均值。</p>
-        <p>可在 <b>设置 → 上传数据覆盖</b> 用 Wind / iFinD 导出的 CSV（两列：月份, 数值）覆盖任一指标，用于口径校准或补充平台未覆盖的序列。</p>
-
-        <h2 id="g8">八、局限与使用纪律</h2>
-        <p><b>① 预测精度存在天花板。</b> 宏观指标的可预测性由其自身性质决定。M2、美国 CPI 同比等高惯性指标相关系数可达 0.95+，但这主要来自惯性；出口、信贷、非农等真正有信息量的指标，0.5–0.7 已是优秀水平。任何声称能把非农预测到 0.9 相关性的方法，都应当先怀疑是否存在数据泄漏。</p>
-        <p><b>② AI 回测尚需你亲自跑。</b> 平台内置的统计模型回测是实时计算的，但 AI 那几列默认为空——因为每一个数据点都意味着一次真实的模型调用与成本。在你跑过 AI 历史回测之前，"AI 研判"的推荐仅基于决策规则而非该指标的实证表现，请勿把它当作已验证的结论。</p>
-        <p><b>③ 传导关系不稳定。</b> 样本期跨越 2010 年以来的去杠杆、疫情、通胀冲击等多个截然不同的政策环境。全样本 β 是这些状态的加权平均，未必代表当下。务必对照"近 5 年 β"与"两个月累计 β"判断稳定性。</p>
-        <p><b>④ 月度频率会稀释事件效应。</b> 真实的数据日冲击集中在公布后数小时内，用月度收益衡量会被当月其他事件淹没。本平台的传导分析给出的是月度层面的统计关系，方向参考价值大于幅度参考价值。</p>
-        <p><b>⑤ 这是研究工具，不是投资建议。</b> 所有预测均为模型与模型输出，不构成任何证券的买卖建议。使用者应独立判断并自行承担风险。</p>
-      </div>
+      <div class="panel guide" id="guideBody"><div class="skel">加载中…</div></div>
     </section>
 
     <!-- 设置 -->
     <section class="view" id="v-settings" hidden>
       <div class="panel">
-        <h2>预测要求 <small>· 写给 AI 的附加指令，作用于所有预测与问答</small></h2>
-        <textarea id="sReq" rows="6" placeholder="例如：
+        <h2>预测要求 <small>· 写给 AI 的附加指令，作用于所有预测、问答与报告生成</small></h2>
+        <div class="chips" id="reqHints"></div>
+        <textarea id="sReq" rows="6" placeholder="直接说你想要什么，例如：
 - 重点关注关税政策变化对出口的影响，引用最新的中美谈判进展
-- 对 CPI 预测必须拆分食品、能源、核心三项分别说明
-- 预测区间宽度不超过上期值的 ±30%
+- 对 CPI 预测必须拆分食品、能源、核心三项分别说明，并给出翘尾与新涨价的拆分
+- 每条依据必须带数字；给出对 10Y 国债与沪深300 的操作含义
 - 优先引用中金、中信、华泰、国信的观点"></textarea>
         <div class="ctl-row">
           <label>默认模型<select id="sModel"></select></label>
           <label><input type="checkbox" id="sAuto"> 新数据到达后自动运行 AI 预测</label>
           <button class="btn primary" id="sSave">保存</button><span class="hint" id="sMsg"></span>
         </div>
+        <p class="hint">AI 的信息来源有两个：①<b>外部网站</b>——东方财富研报中心的当期宏观 / 策略研报（含直达链接）；②<b>本平台内嵌数据库</b>——全部指标的历史序列、五种方法的预测与回测、桥方程与传导回归结果。上面写的要求会同时注入这两类上下文。</p>
       </div>
       <div class="panel">
         <h2>模型与数据源</h2>
@@ -388,10 +304,6 @@
             <div class="ctl-row"><select id="ovInd"></select><input type="file" id="ovFile" accept=".csv,text/csv"><button class="btn" id="ovUp">上传</button><button class="btn ghost" id="ovClear">清除</button><span class="hint" id="ovMsg"></span></div></div>
         </div>
       </div>
-      <div class="panel prose">
-        <h2>方法说明</h2>
-        <p>每个待测指标同时给出三种方法的当期预测并按回测择优：<b>沿用上期</b>（惯性极强的指标）、<b>SARIMAX</b>（季节性 + 春节外生变量的时间序列模型，扩展窗口逐月重估）、<b>AI 研判</b>（大模型读取目标指标历史、关联指标、统计模型参考与当月研报，输出数值、区间、驱动因素、传导机制、证据与风险）。所有预测记录可在档案中追溯到具体研报与 Prompt。数据：中国来自国家统计局 / 海关总署 / 央行口径（东方财富数据中心），美国来自 FRED（不可达时自动切换东方财富·美国宏观备源）；服务端每小时轮询，有新数据自动更新并可自动预测。</p>
-      </div>
     </section>
   </main>
 </div>
@@ -399,6 +311,6 @@
 <div class="drawer" id="drawer" hidden><div class="drawer-card"><button class="modal-x" id="drawerX" aria-label="关闭">×</button><div id="drawerBody"></div></div></div>
 <div class="modal" id="modal" hidden><div class="modal-card"><button class="modal-x" id="modalX" aria-label="关闭">×</button><div id="modalBody"></div></div></div>
 <div class="tip" id="tip" hidden></div>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>

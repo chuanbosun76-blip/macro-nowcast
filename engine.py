@@ -16,13 +16,15 @@ import numpy as np
 
 import config
 import datasource
+import evidence as ev
 import llm
 import markets
 import reports
 import store
 import theory
 from calendar_cn import spring_series
-from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES
+import freqs
+from indicators import BY_ID, GROUPS_ORDER, INDICATORS, LLM_MODES, hierarchy
 from tsmodels import adf_test, expanding_backtest, lag1_corr, ljung_box, spec_from_label
 
 AR_DIR = config.DATA_DIR / "ar_cache"
@@ -31,7 +33,7 @@ AR_VERSION = "v6"
 SEED_FILE = config.ROOT / "ar_seed.json"
 _seed_cache = None
 
-_state = {"series": {}, "ar": {}, "mf": {}, "ar_progress": {}, "ready": False, "loading": False, "error": None, "loaded_at": None,
+_state = {"series": {}, "ar": {}, "mf": {}, "bridge": {}, "ar_progress": {}, "ready": False, "loading": False, "error": None, "loaded_at": None,
           "last_check": None, "version": uuid.uuid4().hex[:12], "pending": {}}
 _lock = threading.RLock()
 JOBS: dict[str, dict] = {}
@@ -40,7 +42,11 @@ UPDATE = {"running": False, "stage": "", "started": None, "job_id": None, "error
 
 # ------------------------------------------------------------------ 工具
 def is_modeled(ind) -> bool:
-    return ind["freq"] == "M" and ind["role"] in ("nowcast", "persist")
+    return ind["freq"] in ("M", "Q") and ind["role"] in ("nowcast", "persist")
+
+
+def step_of(ind) -> int:
+    return {"M": 1, "Q": 3, "A": 12}[ind["freq"]]
 
 
 def unreachable(ind) -> bool:
@@ -60,6 +66,8 @@ def next_month(ind, m: str) -> str:
     if ind["freq"] == "Q":
         mm2 = mm + 3
         return f"{y + (mm2 > 12)}-{(mm2 - 12 if mm2 > 12 else mm2):02d}"
+    if ind["freq"] == "A":
+        return f"{y + 1}-12"
     y2, m2 = (y + 1, 1) if mm == 12 else (y, mm + 1)
     if ind["jan_merge"] and m2 == 1:
         m2 = 2
@@ -79,9 +87,15 @@ def _clean(x):
     return float(x) if isinstance(x, (np.floating, np.integer)) else x
 
 
-def metrics(actual: dict, pred: dict, months=None):
+COVID = ("2020-01", "2020-12")
+
+
+def metrics(actual: dict, pred: dict, months=None, _ex=False):
+    """回测指标；同时给出剔除疫情异常期（2020 年）的稳健口径 rmse_ex / corr_ex，用于组合权重与方法推荐。"""
     ms = [m for m in (months or pred.keys()) if m in actual and m in pred and pred[m] is not None and actual[m] is not None
           and math.isfinite(pred[m])]
+    if _ex:
+        ms = [m for m in ms if not (COVID[0] <= m <= COVID[1])]
     if len(ms) < 3:
         return {"n": len(ms), "corr": None, "rmse": None, "mae": None}
     a = np.array([actual[m] for m in ms])
@@ -89,8 +103,14 @@ def metrics(actual: dict, pred: dict, months=None):
     corr = float(np.corrcoef(a, p)[0, 1]) if a.std() > 1e-9 and p.std() > 1e-9 else None
     err = p - a
     hit = float(np.mean(np.sign(np.diff(a)) == np.sign(np.array([pred[m] for m in ms[1:]]) - a[:-1]))) if len(ms) > 3 else None
-    return {"n": len(ms), "corr": _clean(corr), "rmse": float(np.sqrt((err ** 2).mean())), "mae": float(np.abs(err).mean()),
-            "hit": hit, "start": ms[0], "end": ms[-1]}
+    out = {"n": len(ms), "corr": _clean(corr), "rmse": float(np.sqrt((err ** 2).mean())), "mae": float(np.abs(err).mean()),
+           "hit": hit, "start": ms[0], "end": ms[-1]}
+    if not _ex:
+        ex = metrics(actual, pred, months, _ex=True)
+        out.update(rmse_ex=ex.get("rmse"), corr_ex=ex.get("corr"), hit_ex=ex.get("hit"), n_ex=ex.get("n"))
+        out["rmse_used"] = ex.get("rmse") or out["rmse"]
+        out["corr_used"] = ex.get("corr") if ex.get("corr") is not None else out["corr"]
+    return out
 
 
 def pending_month(ind_id):
@@ -132,6 +152,11 @@ def load_all(force_live=False, background=True, network=True):
                         compute_mf(ind["id"])
                     except Exception:  # noqa
                         traceback.print_exc()
+            for ind_id in BRIDGE_FEATS:
+                try:
+                    compute_bridge(ind_id)
+                except Exception:  # noqa
+                    traceback.print_exc()
             if network and not config.OFFLINE:
                 try:
                     markets.load(force=True)
@@ -196,13 +221,14 @@ def compute_ar(ind_id: str):
     ind = BY_ID[ind_id]
     s = _state["series"][ind_id]
     months, values = s["months"], s["values"]
-    if len(values) < 40:
+    quarterly = ind["freq"] == "Q"
+    if len(values) < (28 if quarterly else 40):
         _state["ar"][ind_id] = {"error": "样本不足"}
         _state["ar_progress"][ind_id] = 1.0
         return
     nxt = next_month(ind, months[-1])
-    exog = np.array(spring_series(months + [nxt]))[:, None] if ind["spring"] else None
-    cfg = [ind["spring"], ind["seasonal"], ind.get("force_d"), config.BACKTEST_START]
+    exog = np.array(spring_series(months + [nxt]))[:, None] if (ind["spring"] and not quarterly) else None
+    cfg = [ind["spring"], ind["seasonal"], ind.get("force_d"), config.BACKTEST_START] + (["Q"] if quarterly else [])
     start_idx = next((i for i, m in enumerate(months) if m >= config.BACKTEST_START), len(months))
     cached = _load_ar_cache(ind_id)
     preds, orders, initial_spec, resume = {}, {}, None, start_idx
@@ -230,7 +256,9 @@ def compute_ar(ind_id: str):
 
     try:
         new_preds, new_orders, spec, fit = expanding_backtest(values, months, max(resume, start_idx), exog=exog, seasonal=ind["seasonal"],
-                                                              progress=prog, force_d=ind.get("force_d"), initial_spec=initial_spec)
+                                                              progress=prog, force_d=ind.get("force_d"), initial_spec=initial_spec,
+                                                              season=4 if quarterly else 12, reselect_month="03" if quarterly else "01",
+                                                              min_obs=24 if quarterly else 36)
     except Exception as e:  # noqa
         _state["ar"][ind_id] = {"error": f"自回归失败：{e}"}
         _state["ar_progress"][ind_id] = 1.0
@@ -238,11 +266,11 @@ def compute_ar(ind_id: str):
     preds.update({m: v for m, v in new_preds.items() if m != "__next__"})
     orders.update({m: v for m, v in new_orders.items() if m != "__next__"})
     adf_stat, adf_p, _ = adf_test(values)
-    lb_q, lb_p = ljung_box(fit.resid, 12) if fit is not None else (None, None)
+    lb_q, lb_p = ljung_box(fit.resid, 8 if quarterly else 12) if fit is not None else (None, None)
     res = {"version": AR_VERSION, "cfg": cfg, "months": months, "values": values,
            "preds": {m: _clean(v) for m, v in preds.items()}, "orders": orders, "nowcast": _clean(new_preds.get("__next__")),
            "nowcast_month": nxt, "final_order": spec.label(), "d": spec.d, "adf_stat": _clean(adf_stat), "adf_p": _clean(adf_p),
-           "lb_resid_p": _clean(lb_p), "lb_raw_p": _clean(ljung_box(values, 12)[1]), "computed_at": time.strftime("%Y-%m-%d %H:%M")}
+           "lb_resid_p": _clean(lb_p), "lb_raw_p": _clean(ljung_box(values, 8 if quarterly else 12)[1]), "computed_at": time.strftime("%Y-%m-%d %H:%M")}
     try:
         (AR_DIR / f"{ind_id}.json").write_text(json.dumps(res))
     except Exception:
@@ -284,46 +312,74 @@ def _nearest_before(d, m, back=2):
     return None
 
 
+def _cand_series(o, target_freq):
+    """候选因子在目标频率下的序列 {期键: 值}（月度→季度按 kind 聚合，允许不完整的当期）。"""
+    so = _state["series"].get(o["id"])
+    if not so or not so["months"]:
+        return None
+    if o["freq"] == target_freq:
+        return dict(zip(so["months"], so["values"]))
+    if target_freq == "Q" and o["freq"] == "M":
+        return {k: v[0] for k, v in freqs.aggregate(o, so["months"], so["values"], "Q", allow_partial=True).items()}
+    return None
+
+
 def compute_mf(ind_id: str):
-    """多因子岭回归：y_t = α + Σβ_i·z_i,t（标准化特征：自身滞后 + 同国关联指标滞后一期/领先指标当期），扩展窗口逐月重估。"""
+    """多因子岭回归：y_t = α + Σβ_i·z_i,t（标准化特征：自身滞后 + 同国关联指标滞后一期 / 领先指标当期），扩展窗口逐期重估。
+    月度目标：候选为同国月度指标；季度目标：候选为同国季度指标 + 月度指标的季度聚合。"""
     ind = BY_ID[ind_id]
     s = _state["series"][ind_id]
     months, values = s["months"], s["values"]
-    if len(values) < 48:
+    freq = ind["freq"]
+    step = step_of(ind)
+    per_year = 12 // step
+    if len(values) < (28 if freq == "Q" else 48):
         _state["mf"][ind_id] = {"error": "样本不足"}
         return
     ym = dict(zip(months, values))
     pm = pending_month(ind_id)
+    sh = lambda m, k: freqs.shift(m, k * step)  # noqa: E731
     cands = []
     for o in INDICATORS:
-        if o["country"] != ind["country"] or o["id"] == ind_id or o["freq"] != "M":
+        if o["country"] != ind["country"] or o["id"] == ind_id or o["freq"] == "A":
             continue
-        so = _state["series"].get(o["id"])
-        if not so or len(so["months"]) < 48:
+        if o.get("source", {}).get("derived") and ind_id in o["source"]["derived"]:
             continue
-        cands.append((o["id"], o["short"], dict(zip(so["months"], so["values"]))))
+        d = _cand_series(o, freq)
+        if not d or len(d) < (28 if freq == "Q" else 48):
+            continue
+        cands.append((o["id"], o["short"], d))
+
+    def nb(d, m, back=2):
+        for k in range(0, back + 1):
+            v = d.get(sh(m, -k))
+            if v is not None:
+                return v
+        return None
 
     def row_for(i, t):
-        r = {"y_lag1": values[i - 1] if i >= 1 else None, "y_lag2": values[i - 2] if i >= 2 else None, "y_lag12": ym.get(_shift(t, -12))}
+        r = {"y_lag1": values[i - 1] if i >= 1 else None, "y_lag2": values[i - 2] if i >= 2 else None, "y_lag12": ym.get(sh(t, -per_year))}
         for key, short, d in cands:
-            r[key] = _nearest_before(d, t if key in LEAD else _shift(t, -1))
+            r[key] = nb(d, t if key in LEAD else sh(t, -1))
         return r
 
     rows = [row_for(i, t) for i, t in enumerate(months)]
-    now_row = {"y_lag1": values[-1], "y_lag2": values[-2], "y_lag12": ym.get(_shift(pm, -12))}
+    now_row = {"y_lag1": values[-1], "y_lag2": values[-2], "y_lag12": ym.get(sh(pm, -per_year))}
     for key, short, d in cands:
-        now_row[key] = _nearest_before(d, pm if key in LEAD else _shift(pm, -1), back=1)
+        now_row[key] = nb(d, pm if key in LEAD else sh(pm, -1), back=1)
     names = list(rows[-1].keys())
-    labels = {"y_lag1": "自身滞后1期", "y_lag2": "自身滞后2期", "y_lag12": "自身滞后12期", **{k: sh + ("（当期）" if k in LEAD else "（滞后1期）") for k, sh, _ in cands}}
+    lag_lbl = "上季" if freq == "Q" else "上年同期"
+    labels = {"y_lag1": "自身滞后1期", "y_lag2": "自身滞后2期", "y_lag12": f"自身{lag_lbl}" if freq == "Q" else "自身滞后12期",
+              **{k: sh_ + ("（当期）" if k in LEAD else "（滞后1期）") for k, sh_, _ in cands}}
     start_idx = next((i for i, m in enumerate(months) if m >= config.BACKTEST_START), len(months))
-    screen_n = max(36, min(start_idx, 72))
+    screen_n = max(3 * per_year, min(start_idx, 6 * per_year))
     # 特征筛选：只用回测起点之前的样本，按 |corr| 取前 N（避免用未来信息选特征）
     y0 = np.array(values[:screen_n], dtype=float)
     scores = []
     for nm in names:
         col = np.array([np.nan if rows[i].get(nm) is None else rows[i][nm] for i in range(screen_n)], dtype=float)
         ok = ~np.isnan(col) & ~np.isnan(y0)
-        if ok.sum() < 24 or col[ok].std() < 1e-9:
+        if ok.sum() < 2 * per_year or col[ok].std() < 1e-9:
             continue
         c = float(np.corrcoef(col[ok], y0[ok])[0, 1])
         if math.isfinite(c):
@@ -337,38 +393,52 @@ def compute_mf(ind_id: str):
 
     def fit(upto):
         ok = ~np.isnan(X[:upto]).any(axis=1) & ~np.isnan(Y[:upto])
-        Xa, Ya = X[:upto][ok], Y[:upto][ok]
-        if len(Ya) < 30:
+        Xa, Ya = X[:upto][ok].copy(), Y[:upto][ok].copy()
+        if len(Ya) < (20 if freq == "Q" else 30):
             return None
+        # 稳健处理：对特征与目标各按 2%/98% 分位缩尾（winsorize），削弱 2020 年等极端值对系数的主导
+        lo, hi = np.nanpercentile(Xa, 2, axis=0), np.nanpercentile(Xa, 98, axis=0)
+        Xa = np.clip(Xa, lo, hi)
+        ylo, yhi = np.nanpercentile(Ya, 2), np.nanpercentile(Ya, 98)
+        Ya = np.clip(Ya, ylo, yhi)
         mu, sd = Xa.mean(axis=0), Xa.std(axis=0)
         sd[sd < 1e-9] = 1.0
         Z = (Xa - mu) / sd
         ymu = Ya.mean()
         A = Z.T @ Z + MF_LAMBDA * np.eye(Z.shape[1])
         beta = np.linalg.solve(A, Z.T @ (Ya - ymu))
-        return mu, sd, ymu, beta
+        resid = Ya - (ymu + Z @ beta)
+        return mu, sd, ymu, beta, float(np.sqrt((resid ** 2).mean())), int(len(Ya))
+
+    def zrow(model, xrow):
+        mu, sd = model[0], model[1]
+        z = (np.array(xrow, dtype=float) - mu) / sd
+        return np.clip(np.where(np.isnan(z), 0.0, z), -3.0, 3.0)  # 截断 ±3σ，防止极端输入外推出不合理预测
 
     def predict(model, xrow):
-        mu, sd, ymu, beta = model
-        z = (np.array(xrow, dtype=float) - mu) / sd
-        z = np.where(np.isnan(z), 0.0, z)
-        return float(ymu + z @ beta)
+        return float(model[2] + zrow(model, xrow) @ model[3])
 
     preds = {}
     model = None
     for i in range(start_idx, len(months)):
-        if model is None or months[i].endswith("-01") or (i - start_idx) % 3 == 0:
+        if model is None or months[i].endswith("-01" if freq == "M" else "-03") or (i - start_idx) % 3 == 0:
             model = fit(i) or model
         if model is None:
             continue
         preds[months[i]] = _clean(predict(model, X[i]))
     final = fit(len(months))
-    nowcast = None
+    nowcast, contrib, now_z = None, {}, {}
     if final:
-        nowcast = _clean(predict(final, [np.nan if now_row.get(nm) is None else now_row[nm] for nm in sel]))
+        xnow = [np.nan if now_row.get(nm) is None else now_row[nm] for nm in sel]
+        nowcast = _clean(predict(final, xnow))
+        z = zrow(final, xnow)
+        contrib = {labels.get(nm, nm): _clean(float(b * zi)) for nm, b, zi in zip(sel, final[3], z)}
+        now_z = {labels.get(nm, nm): _clean(float(zi)) for nm, zi in zip(sel, z)}
     coef = {labels.get(nm, nm): _clean(float(b)) for nm, b in zip(sel, final[3])} if final else {}
+    raw_now = {labels.get(nm, nm): _clean(now_row.get(nm)) for nm in sel}
     _state["mf"][ind_id] = {"preds": preds, "nowcast": nowcast, "nowcast_month": pm, "features": [labels.get(nm, nm) for nm in sel],
-                            "coef": coef, "n_train": int((~np.isnan(X).any(axis=1)).sum()), "lambda": MF_LAMBDA,
+                            "feature_ids": sel, "coef": coef, "contrib": contrib, "now_z": now_z, "now_raw": raw_now, "alpha": _clean(final[2]) if final else None,
+                            "in_sample_rmse": final[4] if final else None, "n_train": final[5] if final else 0, "lambda": MF_LAMBDA,
                             "screen_window": f"{months[0]}–{months[min(screen_n, len(months)) - 1]}", "computed_at": time.strftime("%Y-%m-%d %H:%M")}
 
 
@@ -439,6 +509,8 @@ def transmission(ind_id, start="2010-01"):
     out["implied"] = {"pred": pred, "ref": ref_now, "ref_kind": "SARIMAX 事前预测" if ar_now is not None else "上期值", "surprise": _clean(implied), "z": _clean(z),
                       "method": con.get("used"), "by_method": by_method, "target_label": (b or {}).get("target_label")}
     for key, name, mkt, typ, secid, tx in markets.META:
+        if key not in markets.CORE:
+            continue
         resp = markets.responses(key)
         pairs, pairs2, ms = [], [], []
         for m in sorted(sur):
@@ -464,13 +536,101 @@ def transmission(ind_id, start="2010-01"):
     return out
 
 
+# ------------------------------------------------------------------ 桥方程（季度 GDP ← 月度指标）与多频率视图
+BRIDGE_FEATS = {
+    "gdp_q_yoy": ["ip_yoy", "retail_yoy", "export_yoy", "fai_ytd_yoy", "pmi_mfg", "pmi_nonmfg", "ppi_yoy", "loans_ytd_yoy"],
+    "gdp_nominal_yoy": ["ip_yoy", "retail_yoy", "export_yoy", "ppi_yoy", "cpi_yoy", "fiscal_rev_yoy", "pmi_mfg"],
+    "us_gdp_qoq": ["us_retail_mom", "us_ism_mfg", "us_ism_nonmfg", "us_nfp", "us_durable_mom", "us_houst", "us_unrate", "us_conf_board"],
+}
+
+
+def compute_bridge(ind_id):
+    """桥方程（GDPNow 思路的单方程版）：季度目标 = α + Σβ_j·z̄_j（月度指标季内均值，标准化岭回归）。
+    扩展窗口逐季估计给出样本外回测；逐月用“季度至今均值”代入得到月度追踪值（每公布一个月更新一次）。"""
+    ind = BY_ID[ind_id]
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"] or ind["freq"] != "Q":
+        return
+    feats = {}
+    for fid in BRIDGE_FEATS[ind_id]:
+        so = _state["series"].get(fid)
+        if so and len(so["months"]) >= 60:
+            feats[BY_ID[fid]["short"]] = dict(zip(so["months"], so["values"]))
+    if not feats:
+        return
+    target = dict(zip(s["months"], s["values"]))
+    r = freqs.bridge_build(target, feats, start="2011-03", backtest_start=config.BACKTEST_START[:5] + "03")
+    if not r:
+        return
+    pm = pending_month(ind_id)
+    qm = freqs.period_months(pm, "Q") if pm else []
+    cur = [(m, _clean(r["monthly"][m])) for m in qm if m in r["monthly"]]
+    r.pop("mu"), r.pop("sd"), r.pop("beta")
+    r.update({"target_quarter": pm, "current_months": cur, "nowcast": cur[-1][1] if cur else None, "n_current": len(cur),
+              "monthly": {m: _clean(v) for m, v in r["monthly"].items()}, "preds": {q: _clean(v) for q, v in r["preds"].items()},
+              "computed_at": time.strftime("%Y-%m-%d %H:%M")})
+    _state["bridge"][ind_id] = r
+
+
+def bridge_info(ind_id):
+    return _state["bridge"].get(ind_id)
+
+
+def bridge_preds(ind_id):
+    return (_state["bridge"].get(ind_id) or {}).get("preds") or {}
+
+
+def combo(cands: dict, rmses: dict):
+    """Bates–Granger（1969）组合预测：权重 ∝ 1/RMSE²（回测 RMSE），缺 RMSE 的方法不参与。"""
+    pairs = [(k, v, rmses.get(k)) for k, v in cands.items() if v is not None and rmses.get(k)]
+    if len(pairs) < 2:
+        return None
+    w = np.array([1 / r ** 2 for _, _, r in pairs])
+    w = w / w.sum()
+    return {"value": _clean(float(sum(wi * v for wi, (_, v, _) in zip(w, pairs)))), "weights": {k: _clean(float(wi)) for wi, (k, _, _) in zip(w, pairs)},
+            "rmse": {k: r for k, _, r in pairs}}
+
+
+def views(ind_id, conclusion_value=None, method_label="推荐方法"):
+    """多频率视图：M/Q/A 各自的历史（完整期）与当期追踪值。"""
+    ind = BY_ID[ind_id]
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"]:
+        return {}
+    months, values = s["months"], s["values"]
+    pm = pending_month(ind_id)
+    if conclusion_value is None:
+        b = basis(ind_id)
+        conclusion_value = ((b or {}).get("conclusion") or {}).get("value")
+        method_label = {"persist": "沿用上期", "ar": "SARIMAX", "mf": "多因子回归", "ai": "AI研判"}.get(((b or {}).get("conclusion") or {}).get("used"), "推荐方法")
+    out = {"native": ind["freq"], "unit": ind["unit"], "kind": ind["kind"], "agg": freqs.agg_of(ind)}
+    if ind["freq"] == "M":
+        out["M"] = {"history": list(zip(months[-36:], values[-36:])), "current": {"period": pm, "label": month_label(pm), "value": conclusion_value,
+                    "realized": [], "forecast": [(pm, conclusion_value, method_label)] if conclusion_value is not None else [], "n_realized": 0, "n_total": 1}}
+        for f in ("Q", "A"):
+            hist = freqs.aggregate(ind, months, values, f)
+            cur = freqs.current_period(ind, months, values, f, pm, conclusion_value, method_label)
+            out[f] = {"history": [(k, v[0], v[1]) for k, v in hist.items()][-(24 if f == "Q" else 20):], "current": cur}
+    elif ind["freq"] == "Q":
+        out["Q"] = {"history": list(zip(months[-24:], values[-24:])), "current": {"period": pm, "label": month_label(pm, "Q"), "value": conclusion_value,
+                    "realized": [], "forecast": [(pm, conclusion_value, method_label)] if conclusion_value is not None else [], "n_realized": 0, "n_total": 1}}
+        hist, cur = freqs.q_to_annual(ind, months, values, pm, conclusion_value)
+        out["A"] = {"history": [(k, v[0], v[1]) for k, v in hist.items()][-20:], "current": cur}
+        br = bridge_info(ind_id)
+        if br:
+            mm = sorted(br["monthly"])
+            out["M"] = {"history": [(m, br["monthly"][m]) for m in mm[-36:]], "bridge": {k: br.get(k) for k in ("names", "coef", "r2", "rmse_in", "rmse_oos", "n", "n_oos", "sample", "alpha")},
+                        "current": {"period": pm, "label": month_label(pm, "Q") + "（月度追踪）", "value": br["nowcast"], "realized": br["current_months"],
+                                    "forecast": [], "n_realized": br["n_current"], "n_total": 3, "note": "桥方程：由已公布的月度指标（季度至今均值）推算当季值；每公布一个月更新一次"}}
+    else:
+        out["A"] = {"history": list(zip(months[-20:], values[-20:])), "current": {"period": pm, "label": month_label(pm, "A"), "value": conclusion_value,
+                    "realized": [], "forecast": [(pm, conclusion_value, method_label)] if conclusion_value is not None else [], "n_realized": 0, "n_total": 1}}
+    return out
+
+
 # ------------------------------------------------------------------ 发布日历 / 预测对象 / 预测依据
 def month_label(m, freq="M"):
-    if not m:
-        return "—"
-    if freq == "Q":
-        return f"{m[:4]}年Q{(int(m[5:7]) + 2) // 3}"
-    return f"{m[:4]}年{int(m[5:7])}月"
+    return freqs.period_label(m, freq)
 
 
 def _nth_weekday(y, mo, wd, n):
@@ -596,7 +756,10 @@ def basis(ind_id, sm=None):
         am = (sm or {}).get("ar") or {}
         ms = [m for m in sorted(ar["preds"]) if m in actual][-36:]
         res = [ar["preds"][m] - actual[m] for m in ms if ar["preds"].get(m) is not None and actual.get(m) is not None]
-        sigma = float(np.std(res)) if len(res) >= 6 else None
+        # 稳健标准差：1.4826×MAD，避免 2020 年等极端值把区间撑得毫无意义
+        sigma = float(1.4826 * np.median(np.abs(np.array(res) - np.median(res)))) if len(res) >= 6 else None
+        if sigma is not None and sigma <= 0:
+            sigma = float(np.std(res))
         v = ar.get("nowcast") if ar.get("nowcast_month") == pm else None
         band = [v - 1.28 * sigma, v + 1.28 * sigma] if (v is not None and sigma) else None
         recent = [[m, actual.get(m), ar["preds"].get(m)] for m in ms[-6:]]
@@ -623,22 +786,76 @@ def basis(ind_id, sm=None):
                               + (f"{config.BACKTEST_START} 以来回测相关系数 {_fc(mm.get('corr'))}，RMSE {_fc(mm.get('rmse'))}，方向命中率 {_pct(mm.get('hit'))}。" if mm else ""))}
     live = store.latest_live(ind_id, pm) if modeled else None
     out["ai"] = live
+    br = bridge_info(ind_id)
+    out["bridge"] = None
+    if br and br.get("target_quarter") == pm and br.get("nowcast") is not None:
+        top = sorted(br["coef"].items(), key=lambda kv: -abs(kv[1]))[:4]
+        bm = (sm or {}).get("bridge") or {}
+        out["bridge"] = {"value": br["nowcast"], "n_current": br["n_current"], "r2": br["r2"], "rmse": bm.get("rmse") or br.get("rmse_oos"), "rmse_in": br["rmse_in"],
+                         "names": br["names"], "coef": br["coef"], "months": br["current_months"], "corr": bm.get("corr"), "hit": bm.get("hit"),
+                         "text": (f"桥方程（亚特兰大联储 GDPNow 思路的单方程版）：以 {br['sample']} 共 {br['n']} 个季度估计 y_q = α + Σβ_j·z̄_j，因子为月度指标的季内均值（标准化后岭回归 λ=1），"
+                                  f"样本内 R²={_fc(br['r2'])}；扩展窗口样本外回测 {br['n_oos']} 期，RMSE {_fc(bm.get('rmse') or br.get('rmse_oos'))}"
+                                  + (f"、相关系数 {_fc(bm.get('corr'))}" if bm.get("corr") is not None else "") + "；"
+                                  f"当季已公布 {br['n_current']}/3 个月，按“季度至今均值”推算 {_fmt(br['nowcast'], unit)}{unit}"
+                                  + (f"（逐月追踪：" + "，".join(f"{m[5:7]}月 {_fmt(v, unit)}" for m, v in br["current_months"]) + "）" if len(br["current_months"]) > 1 else "") + "。"
+                                  f"贡献最大的因子（标准化系数）：" + "，".join(f"{k} {v:+.2f}" for k, v in top) + "。")}
     rec = (sm or {}).get("recommend") if sm else "ref"
     why = (sm or {}).get("why") if sm else "参考指标：仅展示最新数据与走势，不做预测"
-    cand = {"persist": out["persist"]["value"], "ar": (out["ar"] or {}).get("value"), "mf": (out["mf"] or {}).get("value"), "ai": (live or {}).get("value")}
+    cand = {"persist": out["persist"]["value"], "ar": (out["ar"] or {}).get("value"), "mf": (out["mf"] or {}).get("value"),
+            "bridge": (out["bridge"] or {}).get("value"), "ai": (live or {}).get("value")}
     val, used, note = cand.get(rec), rec, ""
     if rec == "ai" and val is None:
-        used = "ar" if cand["ar"] is not None else ("mf" if cand["mf"] is not None else "persist")
+        used = next((k for k in ("bridge", "ar", "mf") if cand.get(k) is not None), "persist")
         val = cand[used]
-        note = "AI 研判尚未运行，暂以 " + {"ar": "SARIMAX", "mf": "多因子回归", "persist": "沿用上期"}[used] + " 作为占位值；点击「AI 预测」后以 AI 结果为准。"
-    if val is None and used in ("ar", "mf"):
+        note = "AI 研判尚未运行，暂以 " + {"ar": "SARIMAX", "mf": "多因子回归", "bridge": "桥方程", "persist": "沿用上期"}[used] + " 作为占位值；点击「AI 预测」后以 AI 结果为准。"
+    if val is None and used in ("ar", "mf", "bridge"):
         used, val = "persist", cand["persist"]
-    names = {"persist": "沿用上期", "ar": "SARIMAX", "mf": "多因子回归", "ai": "AI 研判", "ref": "参考"}
+    names = {"persist": "沿用上期", "ar": "SARIMAX", "mf": "多因子回归", "bridge": "桥方程（月度追踪）", "ai": "AI 研判", "ref": "参考"}
     band = (out["ar"] or {}).get("band") if used == "ar" else ([live["low"], live["high"]] if used == "ai" and live and live.get("low") is not None else None)
+    rmses = {"persist": pc.get("rmse_used"), "ar": ((sm or {}).get("ar") or {}).get("rmse_used"), "mf": ((sm or {}).get("mf") or {}).get("rmse_used"),
+             "bridge": ((sm or {}).get("bridge") or {}).get("rmse_used"), "ai": (((sm or {}).get("llm") or {}).get("title") or {}).get("rmse_used")}
+    out["combo"] = combo(cand, rmses)
     out["conclusion"] = {"method": rec, "used": used, "value": val, "band": band, "why": why, "note": note,
                          "text": ("" if not modeled else f"预测对象：{label} {ind['name']}（{'预计 ' + rel + ' 公布' if rel else ind['release']}）。"
                                   f"推荐方法：{names[rec]}（{why}）。预测值 {_fmt(val, unit)}{unit}"
                                   + (f"，区间 {_fmt(band[0], unit)}~{_fmt(band[1], unit)}" if band else "") + "。" + note)}
+    return out
+
+
+def evidence_for(ind_id, sm=None, with_market=True):
+    """结论先行 + ≥5 条量化支撑（供前端「预测依据」与 AI/报告导出使用）。"""
+    ind = BY_ID[ind_id]
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"]:
+        return None
+    sm = sm or (summary(ind_id) if is_modeled(ind) else None)
+    b = basis(ind_id, sm)
+    cands = {}
+    for fid in (_state["mf"].get(ind_id) or {}).get("feature_ids") or []:
+        if fid in BY_ID:
+            so = _state["series"].get(fid)
+            if so and so["months"]:
+                cands[BY_ID[fid]["short"]] = dict(zip(so["months"], so["values"]))
+    for fid in BRIDGE_FEATS.get(ind_id, []):
+        so = _state["series"].get(fid)
+        if so and so["months"]:
+            cands[BY_ID[fid]["short"]] = dict(zip(so["months"], so["values"]))
+    mom = None
+    mom_id = {"cpi_yoy": "cpi_mom"}.get(ind_id)
+    if mom_id and _state["series"].get(mom_id, {}).get("months"):
+        ms = _state["series"][mom_id]
+        mom = (ms["months"], ms["values"])
+    tr = None
+    if with_market:
+        try:
+            tr = transmission(ind_id)
+        except Exception:  # noqa
+            tr = None
+    ctx = {"ind": ind, "months": s["months"], "values": s["values"], "basis": b, "summary": sm, "ar": _state["ar"].get(ind_id),
+           "mf": _state["mf"].get(ind_id), "bridge": bridge_info(ind_id), "cand_series": cands, "mom_series": mom,
+           "transmission": tr, "views": views(ind_id, ((b or {}).get("conclusion") or {}).get("value")), "backtest_start": config.BACKTEST_START}
+    out = ev.build(ctx)
+    out["basis"] = b
     return out
 
 
@@ -675,9 +892,11 @@ def calendar_upcoming(days=45):
 
 
 # ------------------------------------------------------------------ 汇总
-def recommend(ind, persist_corr, ar_corr, llm_m=None, mf_corr=None):
+def recommend(ind, persist_corr, ar_corr, llm_m=None, mf_corr=None, bridge_corr=None, bridge_rmse=None, persist_rmse=None):
     if not is_modeled(ind):
         return "ref", "参考指标：仅展示，不做实时预测"
+    if bridge_corr is not None and bridge_rmse is not None and persist_rmse and bridge_corr >= 0.7 and bridge_rmse < persist_rmse * 0.9:
+        return "bridge", f"桥方程样本外回测 RMSE {bridge_rmse:.2f} 优于沿用上期 {persist_rmse:.2f}（相关性 {bridge_corr:.2f}），且当季已有月度数据支撑"
     if persist_corr is not None and persist_corr >= 0.8:
         if mf_corr is not None and mf_corr - persist_corr >= 0.05:
             return "mf", f"多因子回归回测相关性 {mf_corr:.2f} 显著优于沿用上期 {persist_corr:.2f}"
@@ -712,14 +931,17 @@ def summary(ind_id, start=None, end=None, model=None):
     ar = _state["ar"].get(ind_id) or {}
     arp = ar.get("preds") or {}
     mfp = mf_preds(ind_id)
-    out = {"persist": metrics(actual, pp, win), "ar": metrics(actual, arp, win) if arp else None, "mf": metrics(actual, mfp, win) if mfp else None, "llm": {}}
+    bp = bridge_preds(ind_id)
+    out = {"persist": metrics(actual, pp, win), "ar": metrics(actual, arp, win) if arp else None, "mf": metrics(actual, mfp, win) if mfp else None,
+           "bridge": metrics(actual, bp, win) if bp else None, "llm": {}}
     for mode in LLM_MODES:
         lp = store.latest_preds(ind_id, mode, "backtest", model)
         lp = {m: v for m, v in lp.items() if start <= m <= end}
         if lp:
             lm = sorted(lp)
             out["llm"][mode] = {**metrics(actual, lp, lm), "persist_same": metrics(actual, pp, lm), "ar_same": metrics(actual, arp, lm) if arp else None}
-    rec, why = recommend(ind, out["persist"]["corr"], (out["ar"] or {}).get("corr"), out["llm"].get("title"), (out["mf"] or {}).get("corr"))
+    rec, why = recommend(ind, out["persist"].get("corr_used"), (out["ar"] or {}).get("corr_used"), out["llm"].get("title"), (out["mf"] or {}).get("corr_used"),
+                         (out["bridge"] or {}).get("corr_used"), (out["bridge"] or {}).get("rmse_used"), (out["persist"] or {}).get("rmse_used"))
     out.update(recommend=rec, why=why)
     return out
 
@@ -784,8 +1006,9 @@ def backtest_table(start=None, end=None, model=None, country=None):
         ar = _state["ar"].get(ind["id"]) or {}
         if sm is None:
             continue
-        rows.append({"id": ind["id"], "name": ind["name"], "country": ind["country"], "group": ind["group"], "role": ind["role"], "spring": ind["spring"],
-                     "persist": sm["persist"], "ar": sm["ar"], "mf": sm.get("mf"), "llm": sm["llm"], "recommend": sm["recommend"], "why": sm["why"],
+        rows.append({"id": ind["id"], "name": ind["name"], "country": ind["country"], "group": ind["l1"], "l1": ind["l1"], "l2": ind["l2"],
+                     "role": ind["role"], "spring": ind["spring"], "freq": ind["freq"], "unit": ind["unit"],
+                     "persist": sm["persist"], "ar": sm["ar"], "mf": sm.get("mf"), "bridge": sm.get("bridge"), "llm": sm["llm"], "recommend": sm["recommend"], "why": sm["why"],
                      "mf_features": (_state["mf"].get(ind["id"]) or {}).get("features"),
                      "order": ar.get("final_order"), "adf_p": ar.get("adf_p"), "paper": ind.get("paper")})
     return rows
@@ -801,18 +1024,51 @@ def leak_check(ind_id, mode="title", model=None, split=None):
             "persist_before": metrics(actual, pp, before), "persist_after": metrics(actual, pp, after)}
 
 
-def data_table(country=None, n_months: int = 24, freq="M"):
-    series = _state["series"]
-    ids = [i["id"] for i in INDICATORS if (not country or i["country"] == country) and i["freq"] == freq and series.get(i["id"], {}).get("months")]
-    months = sorted({m for i in ids for m in series[i]["months"]})[-n_months:]
-    cols = []
+def series_at(ind, freq, allow_partial=False):
+    """指标在指定频率下的 {期键: 值}：原生频率直接返回；月度→季/年按 kind 聚合；季度 GDP→月度为桥方程追踪值；季度→年度聚合。"""
+    s = _state["series"].get(ind["id"])
+    if not s or not s["months"]:
+        return {}
+    if ind["freq"] == freq:
+        return dict(zip(s["months"], s["values"]))
+    if ind["freq"] == "M" and freq in ("Q", "A"):
+        return {k: v[0] for k, v in freqs.aggregate(ind, s["months"], s["values"], freq, allow_partial).items()}
+    if ind["freq"] == "Q" and freq == "A":
+        hist, _ = freqs.q_to_annual(ind, s["months"], s["values"], None, None)
+        return {k: v[0] for k, v in hist.items()}
+    if ind["freq"] == "Q" and freq == "M":
+        br = bridge_info(ind["id"])
+        return dict(br["monthly"]) if br else {}
+    return {}
+
+
+def data_table(country=None, n_months: int = 24, freq="M", l1=None):
+    """数据库表：按频率给出各指标序列（原生 + 聚合/桥方程派生），按一级/二级分类排序。"""
+    ids = []
+    for blk in hierarchy(country):
+        if l1 and blk["l1"] != l1:
+            continue
+        for g in blk["groups"]:
+            ids.extend(g["ids"])
+    cols_raw = []
     for i in ids:
         ind = BY_ID[i]
-        s = series[i]
-        lk = dict(zip(s["months"], s["values"]))
-        cols.append({"id": i, "name": ind["name"], "short": ind["short"], "unit": ind["unit"], "role": ind["role"], "group": ind["group"],
-                     "country": ind["country"], "latest_month": s["months"][-1], "latest": s["values"][-1], "values": [lk.get(m) for m in months]})
-    return {"months": months, "columns": cols}
+        d = series_at(ind, freq)
+        if not d:
+            continue
+        cols_raw.append((ind, d))
+    months = sorted({m for _, d in cols_raw for m in d})[-n_months:]
+    cols = []
+    for ind, d in cols_raw:
+        s = _state["series"][ind["id"]]
+        lm = max(d)
+        derived = ind["freq"] != freq
+        how = freqs.agg_of(ind)
+        note = "" if not derived else ("桥方程月度追踪" if ind["freq"] == "Q" and freq == "M" else {"mean": "期内均值", "sum": "期内合计", "last": "期末值"}[how])
+        cols.append({"id": ind["id"], "name": ind["name"], "short": ind["short"], "unit": ind["unit"], "role": ind["role"], "group": ind["l1"], "l1": ind["l1"], "l2": ind["l2"],
+                     "country": ind["country"], "native_freq": ind["freq"], "derived": derived, "derive_note": note, "kind": ind["kind"],
+                     "latest_month": lm, "latest": d[lm], "values": [d.get(m) for m in months], "pending": pending_month(ind["id"]) if not derived else None})
+    return {"months": months, "columns": cols, "freq": freq}
 
 
 # ------------------------------------------------------------------ AI 研判
@@ -822,7 +1078,7 @@ def related_for(ind):
     for o in INDICATORS:
         if o["country"] != ind["country"] or o["id"] == ind["id"]:
             continue
-        if o["group"] not in (ind["group"], "景气", "货币利率", "就业") and ind["group"] not in ("增长",):
+        if o["l1"] not in (ind["l1"], "景气", "金融", "就业") and ind["l1"] not in ("增长",):
             continue
         s = _state["series"].get(o["id"])
         if s and s["months"]:
@@ -973,6 +1229,88 @@ def ask_context(max_months: int = 12) -> str:
             parts.append(f"AI研判={ai['value']:g}（区间 {ai.get('low')}~{ai.get('high')}，置信{ai.get('confidence')}；{ai.get('reason') or ''}）")
         lines.append(f"- {r['name']}：待发布 {r['pending_month']}；" + "；".join(parts) + f"；推荐：{r.get('recommend')}（{r.get('why')}）")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ 一键更新（全站同步）
+SYNC = {"running": False, "stage": "", "pct": 0, "started": None, "finished": None, "error": None, "steps": [], "job_id": None,
+        "version": None, "changed": []}
+
+
+def sync_all(predict=False, mode="title", model=None):
+    """一键更新：①抓取数据库 ②重算 SARIMAX/多因子/桥方程 ③刷新市场与行情 ④（可选）AI 研判。
+    完成后 _state['version'] 变化，前端各页面据此整体刷新。"""
+    if SYNC["running"]:
+        return SYNC
+    SYNC.update(running=True, stage="开始更新…", pct=2, started=time.strftime("%Y-%m-%d %H:%M:%S"), finished=None, error=None,
+                steps=[], job_id=None, changed=[])
+
+    def step(name, pct):
+        SYNC["stage"] = name
+        SYNC["pct"] = pct
+        SYNC["steps"].append({"name": name, "at": time.strftime("%H:%M:%S")})
+
+    def run():
+        try:
+            old = {i["id"]: ((_state["series"].get(i["id"]) or {}).get("months") or [None])[-1] for i in INDICATORS}
+            step("正在从东方财富数据中心拉取中国 / 美国宏观数据…", 10)
+            raw = datasource.load(force_live=True, network=not config.OFFLINE)
+            step("正在重建指标序列…", 35)
+            series = {i["id"]: datasource.build_series(i["id"], raw) for i in INDICATORS}
+            with _lock:
+                _state["series"] = series
+                _state["loaded_at"] = time.strftime("%Y-%m-%d %H:%M")
+                _state["last_check"] = _state["loaded_at"]
+            step("正在重算 SARIMAX（增量，仅新增月份）…", 45)
+            for ind in INDICATORS:
+                if is_modeled(ind) and series[ind["id"]]["months"]:
+                    compute_ar(ind["id"])
+                else:
+                    _state["ar_progress"][ind["id"]] = 1.0
+            step("正在重算多因子回归与桥方程…", 70)
+            for ind in INDICATORS:
+                if is_modeled(ind) and series[ind["id"]]["months"]:
+                    try:
+                        compute_mf(ind["id"])
+                    except Exception:  # noqa
+                        traceback.print_exc()
+            for ind_id in BRIDGE_FEATS:
+                try:
+                    compute_bridge(ind_id)
+                except Exception:  # noqa
+                    traceback.print_exc()
+            step("正在刷新市场行情与月度市场库…", 85)
+            if not config.OFFLINE:
+                try:
+                    markets.load(force=True)
+                except Exception:  # noqa
+                    traceback.print_exc()
+            with _lock:
+                _state["pending"] = {i["id"]: pending_month(i["id"]) for i in INDICATORS if series[i["id"]]["months"]}
+                _state["ready"] = True
+                _state["error"] = None
+                _state["version"] = uuid.uuid4().hex[:12]
+            SYNC["version"] = _state["version"]
+            SYNC["changed"] = [BY_ID[i]["name"] for i, m in old.items()
+                               if m and (series.get(i) or {}).get("months") and series[i]["months"][-1] != m]
+            if predict and not config.OFFLINE:
+                step("正在运行 AI 研判…", 92)
+                ids = [i["id"] for i in INDICATORS if i["role"] == "nowcast" and series[i["id"]]["months"]]
+                job = start_job([(i, pending_month(i), mode, "live") for i in ids], model, force=True, label="一键更新·AI 研判")
+                SYNC["job_id"] = job["id"]
+            step("更新完成", 100)
+        except Exception as e:  # noqa
+            traceback.print_exc()
+            SYNC["error"] = str(e)
+        finally:
+            SYNC["running"] = False
+            SYNC["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    threading.Thread(target=run, daemon=True).start()
+    return SYNC
+
+
+def sync_status():
+    return {**SYNC, "status": status(), "job": JOBS.get(SYNC.get("job_id")) if SYNC.get("job_id") else None}
 
 
 def auto_refresh_loop():

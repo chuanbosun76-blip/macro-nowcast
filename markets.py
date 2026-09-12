@@ -1,4 +1,4 @@
-"""市场月度数据库：股指月收盘（沪深300/上证/创业板/恒生/标普500/纳斯达克100/道琼斯）与国债收益率月均（中美 2Y/10Y）。
+"""市场月度数据库：股指/汇率/商品月收盘（A股宽基、恒生、美股三大、日经、美元指数、USDCNH、黄金、原油）与国债收益率月均（中美 2Y/10Y/30Y）。
 用途：宏观→市场传导分析（事件回归）。数据：内置快照（2005 年起，东方财富 K 线 / 国债收益率表）+ 实时增量更新。"""
 from __future__ import annotations
 
@@ -25,15 +25,28 @@ META = [
     ("hs300", "沪深300", "CN", "equity", "1.000300", "sh000300"),
     ("sh", "上证指数", "CN", "equity", "1.000001", "sh000001"),
     ("cyb", "创业板指", "CN", "equity", "0.399006", "sz399006"),
+    ("zz500", "中证500", "CN", "equity", "1.000905", "sh000905"),
+    ("zz1000", "中证1000", "CN", "equity", "1.000852", "sh000852"),
+    ("kc50", "科创50", "CN", "equity", "1.000688", "sh000688"),
     ("hsi", "恒生指数", "HK", "equity", "100.HSI", "hkHSI"),
-    ("spx", "标普500", "US", "equity", "100.SPX", None),
-    ("ndx", "纳斯达克100", "US", "equity", "100.NDX", None),
-    ("djia", "道琼斯", "US", "equity", "100.DJIA", None),
+    ("spx", "标普500", "US", "equity", "100.SPX", "usINX"),
+    ("ndx", "纳斯达克100", "US", "equity", "100.NDX", "usNDX"),
+    ("djia", "道琼斯", "US", "equity", "100.DJIA", "usDJI"),
+    ("n225", "日经225", "JP", "equity", "100.N225", None),
+    ("udi", "美元指数", "FX", "equity", "100.UDI", None),
+    ("usdcnh", "离岸人民币USDCNH", "FX", "equity", "133.USDCNH", None),
+    ("gold", "COMEX黄金", "CMD", "equity", "101.GC00Y", None),
+    ("oil", "WTI原油", "CMD", "equity", "102.CL00Y", None),
     ("cn10y", "中债10Y收益率", "CN", "yield", "EMM00166466", None),
     ("cn2y", "中债2Y收益率", "CN", "yield", "EMM00588704", None),
+    ("cn30y", "中债30Y收益率", "CN", "yield", "EMM00166469", None),
     ("us10y", "美债10Y收益率", "US", "yield", "EMG00001310", None),
     ("us2y", "美债2Y收益率", "US", "yield", "EMG00001306", None),
+    ("us30y", "美债30Y收益率", "US", "yield", "EMG00001312", None),
 ]
+# 传导分析使用的核心资产（其余仅入库/看板）
+CORE = ["hs300", "sh", "cyb", "hsi", "spx", "ndx", "djia", "udi", "usdcnh", "gold", "cn10y", "cn2y", "us10y", "us2y"]
+ASSET_CLASS = {"equity": "股票", "yield": "利率"}
 BY_KEY = {m[0]: m for m in META}
 _lock = threading.Lock()
 _state = {"data": None, "loaded_at": 0.0, "source": {}, "errors": []}

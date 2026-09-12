@@ -14,7 +14,7 @@ import httpx
 
 import config
 import ifind
-from indicators import BY_ID, EM_FIELDS, INDICATORS
+from indicators import BY_ID, EM_FIELDS, EM_HOUSE_FIELDS, EM_STEP_TABLES, INDICATORS
 
 DC_URL = os.environ.get("EM_DC_URL", "https://datacenter-web.eastmoney.com/api/data/v1/get")
 FRED_CSV = os.environ.get("FRED_CSV_URL", "https://fred.stlouisfed.org/graph/fredgraph.csv")
@@ -55,28 +55,44 @@ def _em_table(rn: str, client: httpx.Client):
     return {"fields": fields, "rows": rows}
 
 
-def _em_house(client: httpx.Client):
-    """70 城新建商品住宅价格指数（同比）按月取均值 → 同比%（指数 100 为基）。"""
-    out = {}
-    for page in range(1, 8):
-        params = {"columns": "REPORT_DATE,CITY,FIRST_COMHOUSE_SAME", "pageNumber": page, "pageSize": 2000,
-                  "sortColumns": "REPORT_DATE", "sortTypes": -1, "source": "WEB", "client": "WEB",
-                  "reportName": "RPT_ECONOMY_HOUSE_PRICE"}
+def _em_house(client: httpx.Client, pages: int = 4):
+    """70 城新建/二手住宅价格：按月对城市取均值（指数 100 为基 → 同比/环比 %）。"""
+    agg = {}
+    for page in range(1, pages + 1):
+        params = {"columns": "REPORT_DATE,CITY," + ",".join(EM_HOUSE_FIELDS), "pageNumber": page, "pageSize": 500,
+                  "sortColumns": "REPORT_DATE", "sortTypes": -1, "source": "WEB", "client": "WEB", "reportName": "RPT_ECONOMY_HOUSE_PRICE"}
         r = client.get(DC_URL, params=params)
         r.raise_for_status()
-        j = r.json()
-        data = (j.get("result") or {}).get("data") or []
+        data = ((r.json().get("result") or {}).get("data")) or []
         if not data:
             break
         for d in data:
-            v = d.get("FIRST_COMHOUSE_SAME")
-            if v is None:
-                continue
-            out.setdefault(d["REPORT_DATE"][:7], []).append(float(v) - 100.0)
-        if len(data) < 2000:
+            m = d["REPORT_DATE"][:7]
+            for f in EM_HOUSE_FIELDS:
+                v = d.get(f)
+                if v is not None:
+                    agg.setdefault(m, {}).setdefault(f, []).append(float(v) - 100.0)
+        if len(data) < 500:
             break
-    rows = [[m, round(sum(v) / len(v), 2)] for m, v in sorted(out.items()) if len(v) >= 30]
-    return {"fields": ["FIRST_COMHOUSE_SAME"], "rows": rows}
+    rows = []
+    for m in sorted(agg):
+        fd = agg[m]
+        if len(fd.get("FIRST_COMHOUSE_SAME", [])) < 30:
+            continue
+        rows.append([m] + [round(sum(fd[f]) / len(fd[f]), 2) if fd.get(f) else None for f in EM_HOUSE_FIELDS])
+    return {"fields": EM_HOUSE_FIELDS, "rows": rows}
+
+
+def _em_step(rn: str, client: httpx.Client):
+    field, datef = EM_STEP_TABLES[rn]
+    r = client.get(DC_URL, params={"columns": "ALL", "pageNumber": 1, "pageSize": 500, "sortColumns": "REPORT_DATE", "sortTypes": 1,
+                                   "source": "WEB", "client": "WEB", "reportName": rn})
+    r.raise_for_status()
+    j = r.json()
+    if not j.get("success"):
+        raise RuntimeError(f"{rn}: {j.get('message')}")
+    rows = sorted([[d[datef][:10], d[field]] for d in j["result"]["data"] if d.get(field) is not None and d.get(datef)])
+    return {"fields": [field], "rows": rows, "step": True}
 
 
 def _parallel(jobs: dict, fn, workers: int = 6, fail_fast_after: int | None = None):
@@ -113,10 +129,15 @@ def _parallel(jobs: dict, fn, workers: int = 6, fail_fast_after: int | None = No
 def fetch_cn():
     with httpx.Client(timeout=config.HTTP_TIMEOUT, headers=UA, follow_redirects=True) as c:
         jobs = {rn: rn for rn in EM_FIELDS}
+        jobs.update({rn: rn for rn in EM_STEP_TABLES})
         jobs["EM_HOUSE70"] = "EM_HOUSE70"
 
         def one(rn):
-            return _em_house(c) if rn == "EM_HOUSE70" else _em_table(rn, c)
+            if rn == "EM_HOUSE70":
+                return _em_house(c)
+            if rn in EM_STEP_TABLES:
+                return _em_step(rn, c)
+            return _em_table(rn, c)
 
         return _parallel(jobs, one, workers=6, fail_fast_after=3)
 
@@ -205,7 +226,13 @@ def load(force_live: bool = False, network: bool = True):
             _state["stage"] = None
             errors = e1 + e2 + e3
             if cn:
-                raw["cn"].update(cn)
+                for rn, tbl in cn.items():
+                    old = raw["cn"].get(rn)
+                    if old and old.get("fields") == tbl.get("fields") and rn == "EM_HOUSE70":
+                        merged = {r[0]: r for r in old["rows"]}
+                        merged.update({r[0]: r for r in tbl["rows"]})
+                        tbl = {"fields": tbl["fields"], "rows": [merged[k] for k in sorted(merged)]}
+                    raw["cn"][rn] = tbl
                 source["cn"] = "东方财富数据中心（实时）" + ("，部分表回退" if e1 else "")
             if us or us_em:
                 raw["us"].update(us)
@@ -282,7 +309,82 @@ def _transform(ser: dict[str, float], how: str, freq="M", scale=1.0):
     return out
 
 
-def build_series(ind_id: str, raw=None):
+def _table_dict(raw, rn, field, fallback=None, scale=1.0):
+    tbl = (raw.get("cn") or {}).get(rn)
+    if not tbl or field not in tbl["fields"]:
+        return None
+    fi = tbl["fields"].index(field)
+    fb = tbl["fields"].index(fallback) if fallback in tbl["fields"] else None
+    out = {}
+    for row in tbl["rows"]:
+        v = row[1 + fi]
+        if v is None and fb is not None:
+            v = row[1 + fb]
+        if v is not None:
+            out[row[0]] = float(v) * scale
+    return out
+
+
+def _gdp_derived(raw, mode):
+    """GDP 累计表 → 当季同比 / 名义当季同比（估算）。"""
+    tbl = (raw.get("cn") or {}).get("RPT_ECONOMY_GDP")
+    if not tbl:
+        return {}
+    f = tbl["fields"]
+    if "SUM_SAME" not in f or "DOMESTICL_PRODUCT_BASE" not in f:
+        return {}
+    gi, li = f.index("SUM_SAME"), f.index("DOMESTICL_PRODUCT_BASE")
+    rows = {r[0]: (r[1 + gi], r[1 + li]) for r in tbl["rows"] if r[1 + gi] is not None and r[1 + li] is not None}
+    out = {}
+    for m in sorted(rows):
+        y, q = int(m[:4]), int(m[5:7])
+        g_c, L = rows[m]
+        if mode == "nominal_yoy":
+            prev_q = f"{y}-{q - 3:02d}" if q > 3 else None
+            Lq = L - rows[prev_q][1] if prev_q and prev_q in rows else (L if q == 3 else None)
+            pm = f"{y - 1}-{q:02d}"
+            ppq = f"{y - 1}-{q - 3:02d}" if q > 3 else None
+            if Lq is None or pm not in rows:
+                continue
+            Lq_prev = rows[pm][1] - rows[ppq][1] if ppq and ppq in rows else (rows[pm][1] if q == 3 else None)
+            if Lq_prev:
+                out[m] = round((Lq / Lq_prev - 1) * 100, 2)
+        else:  # q_yoy：单季实际同比 ≈ (g_c(Q)·W_Q − g_c(Q−1)·W_{Q−1}) / (W_Q − W_{Q−1})，W 为上年同期累计名义值
+            if q == 3:
+                out[m] = g_c
+                continue
+            prev_q = f"{y}-{q - 3:02d}"
+            if prev_q not in rows:
+                continue
+            g_p, L_p = rows[prev_q]
+            W_q, W_p = L / (1 + g_c / 100), L_p / (1 + g_p / 100)
+            if W_q - W_p > 0:
+                out[m] = round((g_c * W_q - g_p * W_p) / (W_q - W_p), 2)
+    return out
+
+
+def _step_to_monthly(rows, first="2008-01"):
+    """事件日期序列 → 月度（月末生效值，前值填充）。"""
+    if not rows:
+        return {}
+    ev = sorted(rows)
+    out, cur, i = {}, None, 0
+    last = time.strftime("%Y-%m")
+    for m in month_range(first, last):
+        me = f"{m}-31"
+        while i < len(ev) and ev[i][0] <= me:
+            cur = float(ev[i][1])
+            i += 1
+        if cur is None and i == 0:
+            # 起点前最后一个事件
+            before = [r for r in ev if r[0] <= me]
+            cur = float(before[-1][1]) if before else None
+        if cur is not None:
+            out[m] = cur
+    return out
+
+
+def build_series(ind_id: str, raw=None, _depth=0):
     raw = raw or _state["raw"] or load()
     ind = BY_ID[ind_id]
     src = ind["source"]
@@ -292,24 +394,58 @@ def build_series(ind_id: str, raw=None):
         notes.append("来源：iFinD EDB")
     elif "em" in src:
         rn, field = src["em"]
-        tbl = (raw.get("cn") or {}).get(rn)
-        if not tbl or field not in tbl["fields"]:
+        d = _table_dict(raw, rn, field, src.get("fallback"), src.get("scale", 1.0))
+        if d is None:
             return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
-        fi = tbl["fields"].index(field)
-        fb = tbl["fields"].index(src["fallback"]) if src.get("fallback") in tbl["fields"] else None
-        for row in tbl["rows"]:
-            v = row[1 + fi]
-            if v is None and fb is not None:
-                v = row[1 + fb]
-            if v is not None:
-                data[row[0]] = float(v)
-        if ind["freq"] == "Q":  # 季度：东方财富以季末月标记（03/06/09/12）
+        data = d
+        if src.get("offset"):
+            data = {m: v + src["offset"] for m, v in data.items()}
+        if ind["freq"] == "Q":
             data = {m: v for m, v in data.items() if m[5:7] in ("03", "06", "09", "12")}
-    elif "em_house" in src:
-        tbl = (raw.get("cn") or {}).get("EM_HOUSE70")
+        if ind["freq"] == "A":
+            data = {m: v for m, v in data.items() if m[5:7] == "12"}
+        notes.append(f"来源：东方财富数据中心 {rn}.{field}")
+    elif "em_accum_yoy" in src:
+        rn, field = src["em_accum_yoy"]
+        d = _table_dict(raw, rn, field)
+        if d is None:
+            return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
+        for m, v in d.items():
+            pm = f"{int(m[:4]) - 1}{m[4:]}"
+            if d.get(pm):
+                data[m] = round((v / d[pm] - 1) * 100, 2)
+        notes.append(f"来源：由 {rn}.{field} 累计值计算累计同比（未剔除基数修订）")
+    elif "em_step" in src:
+        rn, field, datef = src["em_step"]
+        tbl = (raw.get("cn") or {}).get(rn)
         if not tbl:
             return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
-        data = {row[0]: float(row[1]) for row in tbl["rows"] if row[1] is not None}
+        data = _step_to_monthly(tbl["rows"])
+        notes.append(f"来源：{rn}（事件型，月末生效值）")
+    elif "gdp" in src:
+        data = _gdp_derived(raw, src["gdp"])
+        notes.append("来源：由国家统计局 GDP 累计同比与累计名义值推算（估算口径）")
+    elif "derived" in src:
+        a, op, b = src["derived"]
+        if _depth > 3:
+            return {"months": [], "values": [], "notes": ["派生层级过深"]}
+        sa, sb = build_series(a, raw, _depth + 1), build_series(b, raw, _depth + 1)
+        da, db = dict(zip(sa["months"], sa["values"])), dict(zip(sb["months"], sb["values"]))
+        for m in da:
+            if m in db and da[m] is not None and db[m] is not None:
+                data[m] = round(da[m] - db[m], 3) if op == "-" else round(da[m] + db[m], 3)
+        notes.append(f"派生：{BY_ID[a]['short']} {op} {BY_ID[b]['short']}")
+    elif "yield" in src:
+        import markets
+        data = dict(markets.series(src["yield"]))
+        notes.append("来源：东方财富国债收益率表（日频取月均）")
+    elif "em_house" in src:
+        tbl = (raw.get("cn") or {}).get("EM_HOUSE70")
+        if not tbl or src["em_house"] not in tbl["fields"]:
+            return {"months": [], "values": [], "notes": ["数据源暂无此表"]}
+        fi = tbl["fields"].index(src["em_house"])
+        data = {row[0]: float(row[1 + fi]) for row in tbl["rows"] if len(row) > 1 + fi and row[1 + fi] is not None}
+        notes.append("来源：国家统计局 70 城房价（东方财富数据中心，按城市取均值）")
     elif "fred" in src or "em_us" in src:
         ser = (raw.get("us") or {}).get(src["fred"]) if "fred" in src else None
         em = (raw.get("us") or {}).get("EM:" + src["em_us"]) if "em_us" in src else None
@@ -320,7 +456,6 @@ def build_series(ind_id: str, raw=None):
         elif ser:
             monthly = _monthly_from_fred(ser, src.get("agg", "last"))
             if ind["freq"] == "Q":
-                # FRED 季度数据以季度首月标记，转为季末月
                 monthly = {f"{m[:4]}-{int(m[5:7]) + 2:02d}": v for m, v in monthly.items()}
             data = _transform(monthly, src.get("transform", "level"), ind["freq"], src.get("scale", 1.0))
             notes.append("来源：FRED（" + src["fred"] + "）")
@@ -330,10 +465,10 @@ def build_series(ind_id: str, raw=None):
     if ov.exists():
         data.update(read_override(ov))
         notes.append("已使用上传 CSV 覆盖部分数据")
-    data = {m: v for m, v in data.items() if m >= "2008-01"}
+    data = {m: v for m, v in data.items() if m >= ("2005-01" if ind["freq"] in ("Q", "A") else "2008-01")}
     if not data:
         return {"months": [], "values": [], "notes": ["无数据"]}
-    if ind["freq"] == "Q":
+    if ind["freq"] in ("Q", "A"):
         months = sorted(data)
         return {"months": months, "values": [data[m] for m in months], "notes": notes}
     months_all = month_range(min(data), max(data))
