@@ -3,7 +3,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const S = { meta: null, country: "CN", view: "overview", status: null, ov: {}, seriesCache: {}, chat: [], settings: null };
-const VIEW_TITLE = { overview: "总览", predict: "预测中心", data: "数据库", reports: "研报", backtest: "回测", archive: "预测档案", ask: "问 AI", settings: "设置" };
+const VIEW_TITLE = { overview: "总览", live: "实时看板", predict: "预测中心", data: "数据库", reports: "研报", backtest: "回测", archive: "预测档案", ask: "问 AI", settings: "设置" };
 const REC_NAME = { persist: "沿用上期", ar: "SARIMAX", ai: "AI 研判", ref: "参考" };
 const MODE_SHORT = { title: "AI·标题", chunk: "AI·正文", title_ar: "AI·标题+AR", data: "AI·纯数据" };
 const MODES_ORDER = ["title", "chunk", "title_ar", "data"];
@@ -103,6 +103,9 @@ function spark(values) {
 async function refreshStatus() {
   try {
     const st = await api("/api/status"); S.status = st;
+    if (S.meta && JSON.stringify(st.n_indicators) !== JSON.stringify(S.meta.n_indicators)) {
+      try { S.meta = await api("/api/meta"); if (S.view === "overview") loadOverview(); } catch (e) { }
+    }
     const dot = st.error ? "bad" : (st.ready ? "ok" : "warn");
     const d = st.data || {}, src = d.source || {};
     const phase = st.ready ? (st.loading ? `就绪 · 后台${d.stage || "更新中"}` : "模型就绪") : st.loading ? (d.stage ? `${d.stage}…` : `模型计算中 ${Math.round((st.ar_progress || 0) * 100)}%`) : "等待加载";
@@ -153,13 +156,14 @@ function cardHTML(r) {
     <div class="card-h"><div><div class="nm">${esc(r.name)}</div><div class="grp">${esc(r.unit || "指数")} · ${esc(r.release)}</div></div><span class="tag ${best}">推荐：${REC_NAME[best]}</span></div>
     <div class="last"><span class="v">${fmtV(r.last_value, r.unit)}</span><span class="u">${esc(r.unit)} · ${monthLabel(r.last_month, r.freq)}已公布</span>
       ${chg != null ? `<span class="chg ${chg > 0 ? "up" : chg < 0 ? "down" : ""}">${chg > 0 ? "▲" : chg < 0 ? "▼" : "—"} ${fmtV(Math.abs(chg), r.unit)}</span>` : ""}${spark(r.history.map(h => h[1]))}</div>
-    <div class="pend">待发布：<b>${monthLabel(r.pending_month, r.freq)}</b></div>
+    <div class="pend">本次预测 → <b>${monthLabel(r.pending_month, r.freq)}数据</b>${r.release_est ? `<span class="muted"> · 预计 ${esc(r.release_est.slice(5).replace("-", "/"))} 公布</span>` : ""}</div>
     <div class="preds">
       ${pred("persist", "沿用上期", r.persist_pred, `回测相关 ${fmtC(r.persist_corr)}`)}
       ${pred("ar", "SARIMAX", r.ar_pred, `${esc(r.ar_order || "")} · ${fmtC(r.ar_corr)}`)}
       ${pred("ai", "AI 研判", ai ? ai.value : null, ai ? `${ai.low != null ? fmtV(ai.low, r.unit) + "~" + fmtV(ai.high, r.unit) : ""}<span class="conf ${esc(ai.confidence || "")}">${esc(ai.confidence || "")}</span>` : "待运行")}
     </div>
     ${ai && ai.reason ? `<div class="ai-sum"><b>AI：</b>${esc(ai.reason)}</div>` : `<div class="why">${esc(r.why || "")}</div>`}
+    <details class="basis-d"><summary>预测依据 · 为什么这样预测</summary>${basisHTML(r.basis, r)}</details>
     <div class="card-f"><span class="hint">${ai ? esc(r.why || "") : ""}</span><span><button class="btn sm ghost" data-detail="${r.id}">详情</button> <button class="btn sm" data-run="${r.id}">AI 预测</button></span></div>
   </article>`;
 }
@@ -208,17 +212,22 @@ async function showDetail(id) {
     <span>${esc((ser.notes || []).join("；"))}</span>`;
   const runs = await api(`/api/runs?indicator=${id}&limit=20&ok=1`);
   $("#dAI").className = "";
-  $("#dAI").innerHTML = (live ? `<h3 style="margin-top:14px">AI 当期研判 · ${monthLabel(live.target_month, m.freq)} → <span class="up">${fmtV(live.value, m.unit)} ${esc(m.unit)}</span></h3><div class="sum">${esc(live.reason || "")}</div>${analysisHTML(live, m.unit)}` : `<p class="muted" style="margin-top:14px">尚无 AI 当期研判。</p>`) +
-    `<div class="ctl-row" style="margin-top:10px"><button class="btn primary sm" data-run="${id}">运行 AI 预测</button><span class="hint">用当月研报 + 最新数据重新研判</span></div>` +
+  const mp = ser.months_predictable || {};
+  const monthOpts = (mp.live ? `<option value="${mp.live}">${monthLabel(mp.live, m.freq)}（当期 · 尚未公布）</option>` : "") + (mp.backtest || []).map(x => `<option value="${x}">${monthLabel(x, m.freq)}（回测 · 真实值 ${fmtV(act[x], m.unit)}）</option>`).join("");
+  $("#dAI").innerHTML = `<h3 style="margin-top:14px">预测依据</h3>` + basisHTML(ser.basis, Object.assign({ name: m.name, unit: m.unit }, m)) +
+    (live ? `<h3 style="margin-top:14px">AI 当期研判 · ${monthLabel(live.target_month, m.freq)} → <span class="up">${fmtV(live.value, m.unit)} ${esc(m.unit)}</span></h3><div class="sum">${esc(live.reason || "")}</div>${analysisHTML(live, m.unit)}` : ``) +
+    `<div class="ctl-row" style="margin-top:10px"><label>预测月份<select id="dMonth">${monthOpts}</select></label><button class="btn primary sm" data-run="${id}">运行 AI 预测</button><span class="hint">当期 = 用最新研报与数据预测尚未公布的值；历史月 = 只用该月截止前的信息，与真实值对照</span></div>` +
     (runs.length > 1 ? `<h3 style="margin-top:14px">历史记录</h3><div class="tbl-wrap"><table class="arc"><tr><th>时间</th><th>目标月</th><th>预测</th><th>真实</th><th>模型</th><th>结论</th></tr>` +
       runs.map(x => `<tr><td>${esc((x.created_at || "").slice(0, 16))}</td><td>${x.target_month}</td><td><b>${fmtV(x.value, m.unit)}</b></td><td>${fmtV(act[x.target_month], m.unit)}</td><td>${esc(x.model)}</td><td class="r">${esc((x.reason || "").slice(0, 80))} <a href="#" data-run-id="${x.id}">详情</a></td></tr>`).join("") + `</table></div>` : "");
-  bindRunLinks($("#dAI")); $$("[data-run]", $("#dAI")).forEach(b => b.onclick = () => runOne(b.dataset.run, b, true));
+  bindRunLinks($("#dAI")); $$("[data-run]", $("#dAI")).forEach(b => b.onclick = () => runOne(b.dataset.run, b, true, ($("#dMonth") || {}).value || null));
 }
 function bindRunLinks(root) { $$("[data-run-id]", root).forEach(a => a.onclick = ev => { ev.preventDefault(); showRun(a.dataset.runId); }); }
-async function runOne(id, btn, inDrawer) {
+async function runOne(id, btn, inDrawer, month) {
   if (btn) btn.disabled = true;
   try {
-    const job = await api("/api/nowcast", { method: "POST", json: { indicators: [id], mode: $("#pMode").value || "title", model: $("#pModel").value || S.status.model } });
+    const body = { indicators: [id], mode: $("#pMode").value || "title", model: $("#pModel").value || S.status.model };
+    if (month) body.month = month;
+    const job = await api("/api/nowcast", { method: "POST", json: body });
     const box = document.createElement("div"); (btn ? btn.closest(".card, #dAI, .res") || $("#pJob") : $("#pJob")).appendChild(box);
     trackJob(job.id, box, () => { if (btn) btn.disabled = false; loadOverview(); if (inDrawer) showDetail(id); if (S.view === "predict") renderPredictResults(); });
   } catch (e) { if (btn) btn.disabled = false; alertBox(e); }
@@ -255,14 +264,31 @@ function renderPredictControls() {
   const inds = countryInds(["nowcast", "persist"]);
   $("#pInds").innerHTML = `<span class="chip grp">${COUNTRY_NAME[S.country]}</span>` + inds.map(i => `<span class="chip ${i.role === "nowcast" ? "on" : ""}" data-id="${i.id}">${esc(i.short)}</span>`).join("") +
     `<span class="chip" id="pAll">全选</span><span class="chip" id="pNone">清空</span>`;
-  $$("#pInds .chip[data-id]").forEach(c => c.onclick = () => c.classList.toggle("on"));
-  $("#pAll").onclick = () => $$("#pInds .chip[data-id]").forEach(c => c.classList.add("on"));
-  $("#pNone").onclick = () => $$("#pInds .chip[data-id]").forEach(c => c.classList.remove("on"));
+  $$("#pInds .chip[data-id]").forEach(c => c.onclick = () => { c.classList.toggle("on"); renderTargets(); });
+  $("#pAll").onclick = () => { $$("#pInds .chip[data-id]").forEach(c => c.classList.add("on")); renderTargets(); };
+  $("#pNone").onclick = () => { $$("#pInds .chip[data-id]").forEach(c => c.classList.remove("on")); renderTargets(); };
+  const sel = $("#pMonth"), cur = sel.value, opts = ['<option value="">当期（各指标最新待公布月，尚未公布）</option>'];
+  const now = new Date(), earliest = (S.status || {}).llm_earliest || "2017-01";
+  for (let y = now.getFullYear(), mo = now.getMonth() + 1; `${y}-${String(mo).padStart(2, "0")}` >= earliest; mo--) { if (mo === 0) { mo = 12; y--; } const k = `${y}-${String(mo).padStart(2, "0")}`; opts.push(`<option value="${k}">${k.slice(0, 4)}年${+k.slice(5)}月（回测：只用当时信息）</option>`); }
+  sel.innerHTML = opts.join(""); sel.value = cur || ""; sel.onchange = renderTargets;
+  renderTargets();
+}
+async function getRows(country) {
+  if (S.ov[country]) return S.ov[country];
+  try { S.ov[country] = (await api(`/api/overview?country=${country}`)).rows; } catch (e) { return []; }
+  return S.ov[country];
+}
+async function renderTargets() {
+  const ids = $$("#pInds .chip.on[data-id]").map(c => c.dataset.id), month = $("#pMonth").value, rows = await getRows(S.country);
+  if (!ids.length) { $("#pTargets").innerHTML = `<span class="hint">未勾选指标</span>`; return; }
+  $("#pTargets").innerHTML = `<div class="hint">将预测（${ids.length} 项）：</div>` + ids.map(id => { const r = rows.find(x => x.id === id) || {}, m = ind(id); const tm = month || r.pending_month;
+    return `<span class="tgt"><b>${esc(m.short)}</b> → ${monthLabel(tm, m.freq)}${!month && r.release_est ? `<i>预计 ${esc(r.release_est)} 公布</i>` : month ? `<i>回测</i>` : ""}</span>`; }).join("");
 }
 async function runSelected() {
   const ids = $$("#pInds .chip.on[data-id]").map(c => c.dataset.id); if (!ids.length) return;
   $("#pRun").disabled = true;
-  try { const job = await api("/api/nowcast", { method: "POST", json: { indicators: ids, mode: $("#pMode").value, model: $("#pModel").value } }); trackJob(job.id, $("#pJob"), () => { $("#pRun").disabled = false; renderPredictResults(); loadOverview(); }); }
+  const body = { indicators: ids, mode: $("#pMode").value, model: $("#pModel").value }; if ($("#pMonth").value) body.month = $("#pMonth").value;
+  try { const job = await api("/api/nowcast", { method: "POST", json: body }); trackJob(job.id, $("#pJob"), () => { $("#pRun").disabled = false; renderPredictResults(); loadOverview(); }); }
   catch (e) { $("#pRun").disabled = false; alertBox(e); }
 }
 async function updateAndPredict() {
@@ -280,10 +306,11 @@ async function updateAndPredict() {
   setTimeout(poll, 2000);
 }
 async function renderPredictResults() {
-  const rows = await api(`/api/runs?source=live&country=${S.country}&limit=200&ok=1`);
+  const rows = await api(`/api/runs?country=${S.country}&limit=300&ok=1`), ov = await getRows(S.country);
   const seen = new Set(), latest = [];
   for (const r of rows) { const k = r.indicator + r.target_month; if (seen.has(k)) continue; seen.add(k); latest.push(r); }
-  $("#pResults").innerHTML = latest.length ? latest.map(r => { const m = ind(r.indicator); return `<div class="res"><div class="res-h"><span class="nm">${esc(m.name)} · ${monthLabel(r.target_month, m.freq)}</span><span class="val">${fmtV(r.value, m.unit)} <small>${esc(m.unit)}</small></span></div>
+  $("#pResults").innerHTML = latest.length ? latest.slice(0, 60).map(r => { const m = ind(r.indicator); if (!m) return ""; const o = ov.find(x => x.id === r.indicator) || {}; const isLive = r.source === "live" && r.target_month === o.pending_month; const act = (o.history || []).find(h => h[0] === r.target_month);
+    return `<div class="res ${isLive ? "" : "bt"}"><div class="res-h"><span class="nm">${esc(m.name)} · <b>${monthLabel(r.target_month, m.freq)}</b> ${isLive ? `<span class="pill live">当期 · 尚未公布${o.release_est ? " · 预计 " + esc(o.release_est) : ""}</span>` : `<span class="pill">回测${act ? " · 真实值 " + fmtV(act[1], m.unit) : ""}</span>`}</span><span class="val">${fmtV(r.value, m.unit)} <small>${esc(m.unit)}</small>${r.low != null ? `<small class="muted"> 区间 ${fmtV(r.low, m.unit)}~${fmtV(r.high, m.unit)}</small>` : ""}</span></div>
     <div class="sum">${esc(r.reason || "")}</div><details><summary>原理与支撑 · ${esc((r.created_at || "").slice(0, 16))} · ${esc(r.model)}</summary>${analysisHTML(r, m.unit)}</details></div>`; }).join("") : `<div class="skel">暂无当期研判，点击上方按钮运行。</div>`;
   bindRunLinks($("#pResults"));
 }
@@ -423,10 +450,12 @@ function fillCountrySelects() {
 function show(v) {
   if (!VIEW_TITLE[v]) v = "overview"; S.view = v;
   $$(".view").forEach(s => s.hidden = s.id !== "v-" + v); $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.v === v)); $("#viewTitle").textContent = VIEW_TITLE[v];
-  $("#countrySeg").style.visibility = ["ask", "settings", "archive"].includes(v) ? "hidden" : "visible";
+  $("#countrySeg").style.visibility = ["ask", "settings", "archive", "live"].includes(v) ? "hidden" : "visible";
+  if (v !== "live") stopLive();
   if (!S.meta) return;
   if (v === "overview") loadOverview();
-  if (v === "predict") renderPredictResults();
+  if (v === "live") startLive();
+  if (v === "predict") { renderPredictControls(); renderPredictResults(); }
   if (v === "data") { renderTable(); renderSeries(); }
   if (v === "reports") { fillRules(); renderReports(); }
   if (v === "backtest") renderBacktest();
@@ -457,3 +486,79 @@ async function init() {
 }
 addEventListener("hashchange", () => show(location.hash.slice(1)));
 init();
+
+
+/* ---------------- 预测依据 ---------------- */
+function recentTable(rows, unit) {
+  if (!rows || !rows.length) return "";
+  return `<table class="mini"><tr><th>月份</th>${rows.map(r => `<th>${r[0].slice(2).replace("-", "/")}</th>`).join("")}</tr><tr><td>真实</td>${rows.map(r => `<td>${fmtV(r[1], unit)}</td>`).join("")}</tr><tr><td>SARIMAX 事前预测</td>${rows.map(r => `<td>${fmtV(r[2], unit)}</td>`).join("")}</tr></table>`;
+}
+function basisHTML(b, r) {
+  if (!b) return `<div class="hint">数据加载中</div>`;
+  const unit = r.unit || "", c = b.conclusion || {};
+  return `<div class="basis">
+    <div class="basis-row tgt"><span class="k">预测对象</span><div><b>${esc(b.target_label)} ${esc(r.name)}</b> <span class="muted">${b.release_est ? "预计 " + esc(b.release_est) + " 公布" : ""}（发布规律：${esc(b.release_rule)}）</span><br><span class="muted">已公布至 ${monthLabel(b.last_month, r.freq)}：${fmtV(b.last_value, unit)} ${esc(unit)}</span></div></div>
+    ${b.modeled ? `<div class="basis-row con"><span class="k">综合结论</span><div>${esc(c.text || "")}</div></div>` : ""}
+    <div class="basis-row"><span class="k">① 沿用上期</span><div><b>${fmtV(b.persist.value, unit)}</b> — ${esc(b.persist.text)}</div></div>
+    <div class="basis-row"><span class="k">② SARIMAX</span><div>${b.ar ? `<b>${fmtV(b.ar.value, unit)}</b>${b.ar.band ? ` <span class="muted">[${fmtV(b.ar.band[0], unit)}, ${fmtV(b.ar.band[1], unit)}]</span>` : ""} — ${esc(b.ar.text)}${recentTable(b.ar.recent, unit)}` : "非月度指标或样本不足，未建模。"}</div></div>
+    <div class="basis-row"><span class="k">③ AI 研判</span><div>${b.ai ? `<b>${fmtV(b.ai.value, unit)}</b>${b.ai.low != null ? ` <span class="muted">[${fmtV(b.ai.low, unit)}, ${fmtV(b.ai.high, unit)}]</span>` : ""} — ${esc(b.ai.reason || "")}${analysisHTML(b.ai, unit)}` : `尚未运行。点击「AI 预测」后：召回 ${esc(b.target_label)} 截止前的研报（直达链接）+ 最新数据 + 上述统计模型参考，输出数值、区间、驱动因素、传导机制、证据与风险。`}</div></div>
+    <div class="basis-row"><span class="k">理论驱动</span><div>${esc(b.theory || "")}</div></div>
+  </div>`;
+}
+
+/* ---------------- 实时看板 ---------------- */
+const LV = { timers: [], last: {}, trends: {}, feedSeen: new Set() };
+function stopLive() { LV.timers.forEach(clearInterval); LV.timers = []; }
+function startLive() {
+  stopLive(); tickClock(); pollQuotes(); loadPulse(); loadCalendar(); loadFeed(); loadTrends();
+  LV.timers.push(setInterval(tickClock, 1000), setInterval(pollQuotes, 5000), setInterval(loadTrends, 60000), setInterval(loadFeed, 120000), setInterval(() => { loadPulse(); loadCalendar(); }, 300000));
+}
+function tickClock() {
+  const d = new Date(), bj = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60000);
+  $("#lvClock").textContent = bj.toTimeString().slice(0, 8);
+  const ny = new Date(d.getTime() + (d.getTimezoneOffset() - 240) * 60000);
+  $("#lvClockSub").textContent = `北京 ${bj.toISOString().slice(5, 10).replace("-", "/")} · 纽约 ${ny.toTimeString().slice(0, 5)} · 行情每 5 秒刷新`;
+}
+function lvSpark(pts, pre) {
+  if (!pts || pts.length < 2) return "";
+  const W = 120, H = 34, vs = pts.map(p => p[1]); let lo = Math.min(...vs), hi = Math.max(...vs); if (pre != null) { lo = Math.min(lo, pre); hi = Math.max(hi, pre); } if (hi === lo) { hi += 1; lo -= 1; }
+  const x = i => (i / (pts.length - 1)) * W, y = v => H - 3 - (v - lo) / (hi - lo) * (H - 6);
+  const d = pts.map((p, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p[1]).toFixed(1)).join("");
+  const up = vs[vs.length - 1] >= (pre != null ? pre : vs[0]);
+  return `<svg viewBox="0 0 ${W} ${H}" class="lv-spark">${pre != null ? `<line x1="0" x2="${W}" y1="${y(pre)}" y2="${y(pre)}" stroke="#4a5568" stroke-dasharray="2 2"/>` : ""}<path d="${d}" fill="none" stroke="${up ? "#ff5a5a" : "#3ddc97"}" stroke-width="1.5"/></svg>`;
+}
+async function pollQuotes() {
+  let q; try { q = await api("/api/live/quotes"); } catch (e) { return; }
+  $("#lvQuoteMeta").textContent = `· ${q.n} 项 · ${q.fetched_at ? q.fetched_at.slice(11) : ""}${q.error ? " · 行情源异常，显示上次值" : ""}`;
+  const groups = {}; q.items.forEach(it => (groups[it.group] = groups[it.group] || []).push(it));
+  const tile = it => { const prev = LV.last[it.secid]; const flash = prev != null && prev !== it.price ? (it.price > prev ? "flash-up" : "flash-down") : ""; LV.last[it.secid] = it.price; const t = LV.trends[it.secid];
+    const dec = Math.abs(it.price) < 10 ? 4 : Math.abs(it.price) < 1000 ? 2 : 2;
+    return `<div class="lv-q ${it.pct > 0 ? "up" : it.pct < 0 ? "down" : ""} ${flash}" data-sid="${it.secid}"><div class="lv-q-n">${esc(it.name)}<small>${esc(it.em_name || "")}</small></div><div class="lv-q-p">${it.price.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec })}</div><div class="lv-q-c">${it.pct > 0 ? "▲" : it.pct < 0 ? "▼" : ""} ${it.chg > 0 ? "+" : ""}${(+it.chg).toFixed(dec)} · ${it.pct > 0 ? "+" : ""}${(+it.pct).toFixed(2)}%</div>${t ? lvSpark(t.points, t.pre_close) : ""}</div>`; };
+  $("#lvQuotes").innerHTML = Object.entries(groups).map(([g, items]) => `<div class="lv-g">${esc(g)}</div><div class="lv-qgrid">${items.map(tile).join("")}</div>`).join("");
+  $("#lvStrip").innerHTML = `<div class="lv-marquee">${(q.items.concat(q.items)).map(it => `<span class="${it.pct > 0 ? "up" : it.pct < 0 ? "down" : ""}">${esc(it.name)} <b>${it.price}</b> ${it.pct > 0 ? "+" : ""}${(+it.pct).toFixed(2)}%</span>`).join("")}</div>`;
+}
+async function loadTrends() {
+  let q; try { q = await api("/api/live/quotes"); } catch (e) { return; }
+  await Promise.all(q.items.map(async it => { try { LV.trends[it.secid] = await api(`/api/live/trend?secid=${encodeURIComponent(it.secid)}`); } catch (e) { } }));
+  $$("#lvQuotes .lv-q").forEach(el => { const t = LV.trends[el.dataset.sid]; if (!t) return; const old = el.querySelector("svg"); const html = lvSpark(t.points, t.pre_close); if (old) old.outerHTML = html; else el.insertAdjacentHTML("beforeend", html); });
+}
+async function loadPulse() {
+  const [cn, us] = await Promise.all([getRows("CN"), getRows("US")]);
+  const rows = cn.concat(us).filter(r => r.role === "nowcast" && !r.missing && r.basis);
+  $("#lvPulse").innerHTML = rows.map(r => { const c = r.basis.conclusion || {}, v = c.value, d = v != null && r.last_value != null ? v - r.last_value : null;
+    return `<div class="lv-p"><div class="lv-p-n"><span class="flag">${r.country}</span>${esc(r.short)}<small>${monthLabel(r.pending_month, r.freq)}${r.release_est ? " · " + esc(r.release_est.slice(5)) : ""}</small></div>
+      <div class="lv-p-v"><span class="muted">${fmtV(r.last_value, r.unit)}</span><span class="arrow ${d > 0 ? "up" : d < 0 ? "down" : ""}">${d > 0 ? "↗" : d < 0 ? "↘" : "→"}</span><b>${fmtV(v, r.unit)}</b><small>${esc(r.unit)}</small></div>
+      <div class="lv-p-m ${c.used}">${REC_NAME[c.used] || ""}${r.ai ? ` · AI 置信 ${esc(r.ai.confidence || "")}` : ""}</div></div>`; }).join("") || `<div class="skel">暂无</div>`;
+}
+async function loadCalendar() {
+  let c; try { c = await api("/api/calendar?days=45"); } catch (e) { return; }
+  $("#lvCal").innerHTML = c.items.length ? c.items.map(it => `<div class="lv-c ${it.days < 0 ? "past" : it.days <= 3 ? "soon" : ""}"><div class="lv-c-d"><b>${it.date.slice(5).replace("-", "/")}</b><small>${it.days < 0 ? "已过期" : it.days === 0 ? "今天" : "D-" + it.days}</small></div><div class="lv-c-n"><span class="flag">${it.country}</span>${esc(it.name)}<small>${esc(it.target_label)} 数据 · ${esc(it.release)}</small></div><div class="lv-c-v">${it.pred != null ? `<b>${fmtV(it.pred, it.unit)}</b><small>${REC_NAME[it.method] || ""}预测</small>` : `<span class="muted">${fmtV(it.last_value, it.unit)}</span><small>上期</small>`}</div></div>`).join("") : `<div class="skel">未来 45 天无可估算的发布</div>`;
+}
+async function loadFeed() {
+  let f; try { f = await api("/api/live/reports?limit=40"); } catch (e) { return; }
+  if (f.error) { $("#lvFeed").innerHTML = `<div class="hint">${esc(f.error)}</div>`; return; }
+  const first = LV.feedSeen.size === 0;
+  $("#lvFeed").innerHTML = f.items.map(it => { const k = it.url || it.title, fresh = !first && !LV.feedSeen.has(k); LV.feedSeen.add(k);
+    return `<a class="lv-f ${fresh ? "fresh" : ""}" href="${esc(it.url || "#")}" target="_blank" rel="noopener"><div class="lv-f-m">${esc(it.date || "")} · ${esc(it.org || "")}${it.researcher ? " · " + esc(it.researcher) : ""}</div><div class="lv-f-t">${esc(it.title)}</div></a>`; }).join("") || `<div class="skel">暂无</div>`;
+  $("#lvRepMeta").textContent = `· 本月 ${f.n_month || 0} 篇 · ${new Date().toTimeString().slice(0, 5)} 刷新`;
+}

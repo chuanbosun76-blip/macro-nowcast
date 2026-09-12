@@ -13,6 +13,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 import config
 import datasource
 import engine
+import live
 import llm
 import reports
 import store
@@ -69,7 +70,7 @@ def api_status():
 
 @app.get("/api/meta")
 def meta():
-    return jsonify({"indicators": INDICATORS, "modes": LLM_MODES, "groups": GROUPS_ORDER, **engine.status()})
+    return jsonify({"indicators": engine.active_indicators(), "modes": LLM_MODES, "groups": GROUPS_ORDER, **engine.status()})
 
 
 @app.get("/api/overview")
@@ -143,6 +144,52 @@ def api_reports():
         return jsonify({"error": f"研报抓取失败：{e}"}), 502
     return jsonify({"month": month, "indicator": ind_id, "titles": sel, "info": info, "rules": reports.rules()})
 
+
+
+@app.get("/api/months/<ind_id>")
+def api_months(ind_id):
+    if ind_id not in BY_ID:
+        return jsonify({"error": "未知指标"}), 404
+    return jsonify(engine.predictable_months(ind_id))
+
+
+@app.get("/api/calendar")
+def api_calendar():
+    nr = not_ready()
+    if nr:
+        return nr
+    return jsonify({"items": engine.calendar_upcoming(int(request.args.get("days", 45))), "today": date.today().isoformat()})
+
+
+@app.get("/api/live/quotes")
+def api_live_quotes():
+    return jsonify(live.quotes())
+
+
+@app.get("/api/live/trend")
+def api_live_trend():
+    sid = request.args.get("secid", "")
+    if not sid or sid not in {s[0] for s in live.secids()}:
+        return jsonify({"error": "未知行情代码"}), 400
+    return jsonify(live.trend(sid))
+
+
+@app.get("/api/live/reports")
+def api_live_reports():
+    """最新研报流：当月宏观+策略研报，按日期倒序。"""
+    month = date.today().strftime("%Y-%m")
+    try:
+        items = reports.fetch_month(month, None)
+        prev = reports.fetch_month(_prev_month(month), None) if len(items) < 30 else []
+    except Exception as e:  # noqa
+        return jsonify({"items": [], "error": str(e)})
+    allitems = sorted(items + prev, key=lambda x: (x.get("date") or "", x.get("title") or ""), reverse=True)
+    return jsonify({"items": allitems[:int(request.args.get("limit", 40))], "n_month": len(items)})
+
+
+def _prev_month(m):
+    y, mm = int(m[:4]), int(m[5:7])
+    return f"{y - (mm == 1)}-{12 if mm == 1 else mm - 1:02d}"
 
 @app.post("/api/nowcast")
 @need_auth

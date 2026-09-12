@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 import math
 import threading
 import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 
@@ -38,6 +39,18 @@ UPDATE = {"running": False, "stage": "", "started": None, "job_id": None, "error
 # ------------------------------------------------------------------ 工具
 def is_modeled(ind) -> bool:
     return ind["freq"] == "M" and ind["role"] in ("nowcast", "persist")
+
+
+def unreachable(ind) -> bool:
+    """数据已加载但该指标为空（通常是 FRED 独有序列在服务器不可达）→ 前端隐藏。"""
+    if not _state["ready"]:
+        return False
+    s = _state["series"].get(ind["id"])
+    return not s or not s["months"]
+
+
+def active_indicators():
+    return [i for i in INDICATORS if not unreachable(i)]
 
 
 def next_month(ind, m: str) -> str:
@@ -233,8 +246,206 @@ def status():
             "has_key": bool(config.DEEPSEEK_API_KEY or config.ANTHROPIC_API_KEY), "auth_required": bool(config.ACCESS_PASSWORD),
             "backtest_start": config.BACKTEST_START, "llm_earliest": config.LLM_EARLIEST, "leak_split": config.LEAK_SPLIT,
             "refresh_hours": config.REFRESH_HOURS, "auto_predict": bool(store.get_setting("auto_predict", config.AUTO_PREDICT)),
-            "runs": store.count_runs(), "n_indicators": {"CN": sum(1 for i in INDICATORS if i["country"] == "CN"),
-                                                          "US": sum(1 for i in INDICATORS if i["country"] == "US")}}
+            "runs": store.count_runs(), "n_indicators": {"CN": sum(1 for i in active_indicators() if i["country"] == "CN"),
+                                                          "US": sum(1 for i in active_indicators() if i["country"] == "US")},
+            "hidden_indicators": [i["id"] for i in INDICATORS if unreachable(i)]}
+
+
+# ------------------------------------------------------------------ 发布日历 / 预测对象 / 预测依据
+def month_label(m, freq="M"):
+    if not m:
+        return "—"
+    if freq == "Q":
+        return f"{m[:4]}年Q{(int(m[5:7]) + 2) // 3}"
+    return f"{m[:4]}年{int(m[5:7])}月"
+
+
+def _nth_weekday(y, mo, wd, n):
+    d = date(y, mo, 1)
+    return d + timedelta(days=(wd - d.weekday()) % 7 + 7 * (n - 1))
+
+
+def _nth_workday(y, mo, n):
+    d, c = date(y, mo, 1), 0
+    while True:
+        if d.weekday() < 5:
+            c += 1
+            if c == n:
+                return d
+        d += timedelta(days=1)
+
+
+def _last_weekday(y, mo, wd):
+    last = date(y, mo, calendar.monthrange(y, mo)[1])
+    return last - timedelta(days=(last.weekday() - wd) % 7)
+
+
+def _last_day(y, mo):
+    return date(y, mo, calendar.monthrange(y, mo)[1])
+
+
+def next_release(ind, month):
+    """按 indicators.release 的发布规律估计 month 期数据的公布日（ISO）；无法解析返回 None。"""
+    if not month:
+        return None
+    r = ind["release"]
+    y, mo = int(month[:4]), int(month[5:7])
+
+    def ym(k):
+        t = y * 12 + mo - 1 + k
+        return t // 12, t % 12 + 1
+
+    try:
+        if ind["freq"] == "Q":
+            ny, nm = ym(1)
+            if "月末" in r:
+                return _last_day(ny, nm).isoformat()
+            g = re.search(r"(\d+)\s*[–-]\s*(\d+)", r)
+            return date(ny, nm, int(g.group(2)) if g else 20).isoformat()
+        if r.startswith("每"):
+            return None
+        if "当月" in r:
+            if "最后一个周二" in r:
+                return _last_weekday(y, mo, 1).isoformat()
+            if "中旬" in r:
+                return date(y, mo, 15).isoformat()
+            if "下旬" in r:
+                return date(y, mo, 25).isoformat()
+            if "月末" in r or "月底" in r:
+                return _last_day(y, mo).isoformat()
+        ny, nm = ym(2 if "隔月" in r else 1)
+        if "第一个周五" in r:
+            return _nth_weekday(ny, nm, 4, 1).isoformat()
+        if "第一个工作日" in r:
+            return _nth_workday(ny, nm, 1).isoformat()
+        if "第三个工作日" in r:
+            return _nth_workday(ny, nm, 3).isoformat()
+        g = re.search(r"(\d+)\s*[–-]\s*(\d+)\s*日", r)
+        if g:
+            return date(ny, nm, int(g.group(2))).isoformat()
+        g = re.search(r"(\d+)\s*日", r)
+        if g:
+            return date(ny, nm, int(g.group(1))).isoformat()
+        if "月初" in r:
+            return date(ny, nm, 5).isoformat()
+        if "中旬" in r:
+            return date(ny, nm, 15).isoformat()
+        if "下旬" in r:
+            return date(ny, nm, 25).isoformat()
+        if "月底" in r or "月末" in r:
+            return _last_day(ny, nm).isoformat()
+    except Exception:
+        return None
+    return None
+
+
+def _fmt(v, unit=""):
+    if v is None or (isinstance(v, float) and not math.isfinite(v)):
+        return "—"
+    if unit in ("亿元", "千人", "千套"):
+        return f"{v:,.0f}"
+    return f"{v:.2f}".rstrip("0").rstrip(".") if abs(v) < 1000 else f"{v:,.1f}"
+
+
+def _fc(v, nd=2):
+    return "—" if v is None else f"{v:.{nd}f}"
+
+
+def _pct(v):
+    return "—" if v is None else f"{v * 100:.0f}%"
+
+
+def basis(ind_id, sm=None):
+    """预测对象 + 三种方法各自的依据（数值、模型诊断、回测表现）+ 综合结论。"""
+    ind = BY_ID[ind_id]
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"]:
+        return None
+    unit = ind["unit"]
+    pm = pending_month(ind_id)
+    modeled = is_modeled(ind)
+    if sm is None and modeled:
+        sm = summary(ind_id)
+    ar = _state["ar"].get(ind_id) or {}
+    actual = _actual(ind_id)
+    label = month_label(pm, ind["freq"])
+    rel = next_release(ind, pm)
+    last_m, last_v = s["months"][-1], s["values"][-1]
+    out = {"target_month": pm, "target_label": label, "release_est": rel, "release_rule": ind["release"], "last_month": last_m,
+           "last_value": last_v, "modeled": modeled, "theory": ind.get("theory")}
+    pc = (sm or {}).get("persist") or {}
+    out["persist"] = {"value": last_v, "ref_month": last_m, "corr": pc.get("corr"), "hit": pc.get("hit"), "n": pc.get("n"),
+                      "text": (f"取最近一期（{month_label(last_m, ind['freq'])}）实际值 {_fmt(last_v, unit)}{unit} 作为 {label} 的预测。"
+                               + (f"{config.BACKTEST_START} 以来该做法与实际值的相关系数 {_fc(pc.get('corr'))}（{pc.get('n')} 期回测）。" if pc else "")
+                               + "逻辑：宏观指标存在惯性，上期值是无新增信息条件下的基准。")}
+    out["ar"] = None
+    if ar.get("preds"):
+        am = (sm or {}).get("ar") or {}
+        ms = [m for m in sorted(ar["preds"]) if m in actual][-36:]
+        res = [ar["preds"][m] - actual[m] for m in ms if ar["preds"].get(m) is not None and actual.get(m) is not None]
+        sigma = float(np.std(res)) if len(res) >= 6 else None
+        v = ar.get("nowcast") if ar.get("nowcast_month") == pm else None
+        band = [v - 1.28 * sigma, v + 1.28 * sigma] if (v is not None and sigma) else None
+        recent = [[m, actual.get(m), ar["preds"].get(m)] for m in ms[-6:]]
+        d = ar.get("d") or 0
+        out["ar"] = {"value": v, "order": ar.get("final_order"), "d": d, "adf_p": ar.get("adf_p"), "lb_resid_p": ar.get("lb_resid_p"),
+                     "spring": ind["spring"], "seasonal": ind["seasonal"], "n_obs": len(s["months"]), "sample": f"{s['months'][0]} 至 {last_m}",
+                     "corr": am.get("corr"), "rmse": am.get("rmse"), "hit": am.get("hit"), "sigma": sigma, "band": band, "recent": recent,
+                     "text": (f"SARIMAX{ar.get('final_order') or ''}：样本 {s['months'][0]}–{last_m} 共 {len(s['months'])} 期；"
+                              f"ADF 单位根检验 p={_fc(ar.get('adf_p'), 3)}（{'平稳，直接建模' if d == 0 else '非平稳，一阶差分后建模'}）；"
+                              + ("含 12 期季节项；" if ind["seasonal"] else "") + ("含春节假期比例外生变量；" if ind["spring"] else "")
+                              + f"每年 1 月按 AIC 重选阶数，扩展窗口逐月只用截至上月的数据重估（无未来信息）。"
+                              + (f"{config.BACKTEST_START} 以来回测相关系数 {_fc(am.get('corr'))}，RMSE {_fc(am.get('rmse'))}，方向命中率 {_pct(am.get('hit'))}；" if am else "")
+                              + (f"近 {len(res)} 期残差 σ={_fc(sigma)}，80% 置信区间 [{_fmt(band[0], unit)}, {_fmt(band[1], unit)}]。" if band else ""))}
+    live = store.latest_live(ind_id, pm) if modeled else None
+    out["ai"] = live
+    rec = (sm or {}).get("recommend") if sm else "ref"
+    why = (sm or {}).get("why") if sm else "参考指标：仅展示最新数据与走势，不做预测"
+    cand = {"persist": out["persist"]["value"], "ar": (out["ar"] or {}).get("value"), "ai": (live or {}).get("value")}
+    val, used, note = cand.get(rec), rec, ""
+    if rec == "ai" and val is None:
+        used = "ar" if cand["ar"] is not None else "persist"
+        val = cand[used]
+        note = "AI 研判尚未运行，暂以 " + {"ar": "SARIMAX", "persist": "沿用上期"}[used] + " 作为占位值；点击「AI 预测」后以 AI 结果为准。"
+    names = {"persist": "沿用上期", "ar": "SARIMAX", "ai": "AI 研判", "ref": "参考"}
+    band = (out["ar"] or {}).get("band") if used == "ar" else ([live["low"], live["high"]] if used == "ai" and live and live.get("low") is not None else None)
+    out["conclusion"] = {"method": rec, "used": used, "value": val, "band": band, "why": why, "note": note,
+                         "text": ("" if not modeled else f"预测对象：{label} {ind['name']}（{'预计 ' + rel + ' 公布' if rel else ind['release']}）。"
+                                  f"推荐方法：{names[rec]}（{why}）。预测值 {_fmt(val, unit)}{unit}"
+                                  + (f"，区间 {_fmt(band[0], unit)}~{_fmt(band[1], unit)}" if band else "") + "。" + note)}
+    return out
+
+
+def predictable_months(ind_id):
+    """可预测的月份：当期（实时，尚未公布）+ 历史回测月（研报可得的 LLM_EARLIEST 起）。"""
+    s = _state["series"].get(ind_id)
+    if not s or not s["months"]:
+        return {"live": None, "backtest": []}
+    return {"live": pending_month(ind_id), "backtest": [m for m in s["months"] if m >= config.LLM_EARLIEST][::-1]}
+
+
+def calendar_upcoming(days=45):
+    """未来若干天内的发布日历（估计），附带当前推荐预测值。"""
+    today = date.today()
+    out = []
+    for ind in active_indicators():
+        s = _state["series"].get(ind["id"])
+        if not s or not s["months"]:
+            continue
+        pm = pending_month(ind["id"])
+        rel = next_release(ind, pm)
+        if not rel:
+            continue
+        d = date.fromisoformat(rel)
+        if d < today - timedelta(days=3) or d > today + timedelta(days=days):
+            continue
+        b = basis(ind["id"]) if is_modeled(ind) else None
+        out.append({"id": ind["id"], "name": ind["name"], "short": ind["short"], "country": ind["country"], "unit": ind["unit"], "freq": ind["freq"],
+                    "target_month": pm, "target_label": month_label(pm, ind["freq"]), "date": rel, "days": (d - today).days,
+                    "last_value": s["values"][-1], "pred": (b or {}).get("conclusion", {}).get("value"), "method": (b or {}).get("conclusion", {}).get("used"),
+                    "ai": bool((b or {}).get("ai")), "release": ind["release"]})
+    out.sort(key=lambda x: (x["date"], x["country"]))
+    return out
 
 
 # ------------------------------------------------------------------ 汇总
@@ -283,7 +494,7 @@ def summary(ind_id, start=None, end=None, model=None):
 
 def overview(country=None):
     rows = []
-    for ind in INDICATORS:
+    for ind in active_indicators():
         if country and ind["country"] != country:
             continue
         s = _state["series"].get(ind["id"])
@@ -305,7 +516,7 @@ def overview(country=None):
             "persist_corr": (sm or {}).get("persist", {}).get("corr") if sm else None, "ar_corr": ((sm or {}).get("ar") or {}).get("corr") if sm else None,
             "llm_corr": {k: v.get("corr") for k, v in ((sm or {}).get("llm") or {}).items()} if sm else {},
             "recommend": (sm or {}).get("recommend") if sm else "ref", "why": (sm or {}).get("why") if sm else "参考指标",
-            "ai": live, "notes": s.get("notes", []),
+            "ai": live, "notes": s.get("notes", []), "basis": basis(ind["id"], sm), "release_est": next_release(ind, pm),
         })
     return rows
 
@@ -322,12 +533,14 @@ def series_payload(ind_id, model=None):
             out["llm"][mode] = lp
     live = [r for r in store.list_runs(indicator=ind_id, source="live", limit=20, ok_only=True)]
     out["live"] = live[:5]
+    out["basis"] = basis(ind_id)
+    out["months_predictable"] = predictable_months(ind_id)
     return out
 
 
 def backtest_table(start=None, end=None, model=None, country=None):
     rows = []
-    for ind in INDICATORS:
+    for ind in active_indicators():
         if not is_modeled(ind) or (country and ind["country"] != country):
             continue
         sm = summary(ind["id"], start, end, model)

@@ -12,6 +12,7 @@
     <div class="brand"><div class="seal">观</div><div><div class="brand-t">观数</div><div class="brand-s">MACRO NOWCAST</div></div></div>
     <nav id="nav">
       <a href="#overview" data-v="overview"><b>总览</b><span>最新数据 · 当期预测</span></a>
+      <a href="#live" data-v="live"><b>实时看板</b><span>行情脉搏 · 发布日历 · 研报流</span></a>
       <a href="#predict" data-v="predict"><b>预测中心</b><span>AI 研判 · 更新数据</span></a>
       <a href="#data" data-v="data"><b>数据库</b><span>中美宏观 · 10 年+ 历史</span></a>
       <a href="#reports" data-v="reports"><b>研报</b><span>召回 · 直达链接</span></a>
@@ -38,6 +39,31 @@
       <div id="ovGroups"><div class="skel">加载中…</div></div>
     </section>
 
+
+    <!-- 实时看板 -->
+    <section class="view live" id="v-live" hidden>
+      <div class="live-top">
+        <div class="live-clock"><span id="lvClock">--:--:--</span><span class="lv-sub" id="lvClockSub">北京时间 · 行情每 5 秒刷新</span></div>
+        <div class="live-strip" id="lvStrip"></div>
+      </div>
+      <div class="live-grid">
+        <div class="live-col">
+          <div class="lv-h">市场脉搏 <small id="lvQuoteMeta"></small></div>
+          <div class="lv-quotes" id="lvQuotes"><div class="skel">连接行情…</div></div>
+        </div>
+        <div class="live-col">
+          <div class="lv-h">预测脉搏 <small>· 当期待公布指标：上期 → 推荐预测</small></div>
+          <div class="lv-pulse" id="lvPulse"><div class="skel">加载中…</div></div>
+          <div class="lv-h" style="margin-top:14px">发布日历 <small>· 未来 45 天（按各机构发布规律估算）</small></div>
+          <div class="lv-cal" id="lvCal"><div class="skel">加载中…</div></div>
+        </div>
+        <div class="live-col">
+          <div class="lv-h">研报流 <small id="lvRepMeta">· 宏观 / 策略 · 每 2 分钟刷新</small></div>
+          <div class="lv-feed" id="lvFeed"><div class="skel">加载中…</div></div>
+        </div>
+      </div>
+    </section>
+
     <!-- 预测中心 -->
     <section class="view" id="v-predict" hidden>
       <div class="panel">
@@ -45,11 +71,13 @@
         <div class="ctl-row">
           <label>模型<select id="pModel"></select></label>
           <label>输入<select id="pMode"></select></label>
+          <label>预测月份<select id="pMonth"><option value="">当期（各指标最新待公布月）</option></select></label>
           <button class="btn primary" id="pUpdate">⟳ 更新最新数据并预测全部待测指标</button>
           <button class="btn" id="pRun">仅对勾选指标运行 AI 研判</button>
         </div>
         <div class="chips" id="pInds"></div>
-        <p class="hint">流程：拉取最新官方数据 → 增量重算 SARIMAX → 召回当月研报 → AI 结合数据、统计模型与研报输出数值、区间、驱动因素、传导机制与风险。每个指标约 15–60 秒。</p>
+        <div class="target-list" id="pTargets"></div>
+        <p class="hint">流程：拉取最新官方数据 → 增量重算 SARIMAX → 召回当月研报 → AI 结合数据、统计模型与研报输出数值、区间、驱动因素、传导机制与风险。每个指标约 15–60 秒。选择历史月份可做“回到当时”的回测预测（只用该月截止前的研报与数据），结果与真实值对照。</p>
         <div id="pJob"></div>
       </div>
       <div class="panel"><h2>最新研判 <small>· 当期实时预测（点击展开原理与支撑）</small></h2><div id="pResults"><div class="skel">暂无</div></div></div>
